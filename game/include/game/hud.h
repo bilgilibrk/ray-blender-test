@@ -17,7 +17,9 @@ typedef struct HudStats {
     int drawnChunks;
     int totalChunks;
     int triangles;
+    int lightCount;
     bool audioActive;
+    bool night;
 } HudStats;
 
 void HudDraw(const Race *race, bool paused);

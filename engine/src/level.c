@@ -49,6 +49,7 @@ static size_t EstimateLevelBytes(const JsonValue *root, int autoCheckpoints)
     bytes += sizeof(LevelSpawn) * (size_t)JsonCount(spawns);
     bytes += sizeof(LevelWaypoint) * (size_t)JsonCount(waypoints);
     bytes += sizeof(LevelCheckpoint) * (size_t)(JsonCount(checkpoints) + autoCheckpoints);
+    bytes += sizeof(LevelLight) * (size_t)JsonCount(JsonGet(root, "lights"));
 
     for (int i = 0; i < JsonCount(props); i++) {
         bytes += strlen(JsonStringField(JsonAt(props, i), "model", "")) + 1;
@@ -118,6 +119,9 @@ bool LevelLoad(Level *level, const char *path)
     level->groundColor = ReadColor(settings, "ground_color", (Color){ 104, 152, 84, 255 });
     level->sunDirection = Vector3Normalize(
         ReadVec3(settings, "sun_direction", (Vector3){ -0.45f, -1.0f, -0.35f }));
+    level->sunColor = ReadColor(settings, "sun_color", (Color){ 255, 250, 235, 255 });
+    level->sunIntensity = (float)JsonNumberField(settings, "sun_intensity", 0.62);
+    level->ambientColor = ReadColor(settings, "ambient_color", (Color){ 88, 90, 100, 255 });
     if (level->laps < 1) level->laps = 1;
 
     // --- props ------------------------------------------------------------
@@ -211,11 +215,35 @@ bool LevelLoad(Level *level, const char *path)
         TraceLog(LOG_INFO, "LEVEL: generated %d checkpoints from centreline", autoChecks);
     }
 
+    // --- lights ---------------------------------------------------------------
+    const JsonValue *jLights = JsonGet(root, "lights");
+    level->lightCount = JsonCount(jLights);
+    if (level->lightCount > 0) {
+        level->lights = ArenaAlloc(&level->arena, sizeof(LevelLight) * (size_t)level->lightCount);
+    }
+    for (int i = 0; i < level->lightCount; i++) {
+        const JsonValue *o = JsonAt(jLights, i);
+        LevelLight *light = &level->lights[i];
+        light->position = ReadVec3(o, "pos", (Vector3){ 0 });
+        light->direction = ReadVec3(o, "dir", (Vector3){ 0.0f, -1.0f, 0.0f });
+        light->color = ReadColor(o, "color", WHITE);
+        light->intensity = (float)JsonNumberField(o, "intensity", 1.0);
+        light->range = (float)JsonNumberField(o, "range", 5.0);
+
+        const char *type = JsonStringField(o, "type", "point");
+        light->isSpot = (strcmp(type, "spot") == 0);
+
+        float cone[2] = { 22.0f, 34.0f };
+        JsonFloatsField(o, "cone", cone, 2);
+        light->innerConeDeg = cone[0];
+        light->outerConeDeg = cone[1];
+    }
+
     TraceLog(LOG_INFO,
-             "LEVEL: '%s' loaded — %d props, %d colliders, %d spawns, %d waypoints, %d checkpoints "
-             "(%.1f/%.1f KB arena)",
+             "LEVEL: '%s' loaded — %d props, %d colliders, %d spawns, %d waypoints, "
+             "%d checkpoints, %d lights (%.1f/%.1f KB arena)",
              level->name, level->propCount, level->colliderCount, level->spawnCount,
-             level->waypointCount, level->checkpointCount,
+             level->waypointCount, level->checkpointCount, level->lightCount,
              level->arena.used / 1024.0, level->arena.capacity / 1024.0);
 
     ArenaFree(&scratch);

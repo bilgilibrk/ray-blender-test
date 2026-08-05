@@ -37,6 +37,7 @@ void InputUpdate(InputState *state)
     state->pressed[ACTION_RESET_CAR]     = IsKeyPressed(KEY_R);
     state->pressed[ACTION_TOGGLE_DEBUG]  = IsKeyPressed(KEY_F1);
     state->pressed[ACTION_TOGGLE_CAMERA] = IsKeyPressed(KEY_C);
+    state->pressed[ACTION_TOGGLE_NIGHT]  = IsKeyPressed(KEY_N);
     state->pressed[ACTION_SCREENSHOT]    = IsKeyPressed(KEY_F2);
     state->pressed[ACTION_QUIT]          = IsKeyPressed(KEY_ESCAPE);
 

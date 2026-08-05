@@ -47,6 +47,14 @@ PROP_TYPE = "kr_type"          # str: spawn | checkpoint | racingline | collider
 PROP_INDEX = "kr_index"        # int: ordering for spawns and checkpoints
 PROP_WIDTH = "kr_width"        # float: gate or track width override
 PROP_SOLID = "kr_solid"        # bool: emit a collider for this prop
+PROP_INTENSITY = "kr_intensity"  # float: overrides the power-derived brightness
+PROP_RANGE = "kr_range"          # float: overrides the light's reach
+
+# Blender measures light power in watts; the engine wants a small unitless
+# brightness. Dividing by this keeps the Power field in the UI as the natural
+# control, and kr_intensity overrides it outright.
+LIGHT_WATTS_PER_UNIT = 100.0
+LIGHT_DEFAULT_RANGE = 6.0
 
 # The kit's tiles all share this cell origin offset, in Blender XY.
 GRID_OFFSET = (-0.35, 0.65)
@@ -194,8 +202,13 @@ class KRLevelSettings(PropertyGroup):
     auto_colliders: BoolProperty(name="Auto Colliders From Scenery", default=True,
                                  description="Emit a box collider for scenery prefabs "
                                              "(barriers, trees, grandstands and friends)")
+    sun_intensity: FloatProperty(name="Sun", default=0.62, min=0.0, max=4.0,
+                                 description="Key light strength. Drop it towards 0 for a night "
+                                             "race so the placed lights carry the scene")
     sky_color: bpy.props.FloatVectorProperty(name="Sky", subtype="COLOR", size=3,
                                              default=(0.486, 0.690, 0.839), min=0.0, max=1.0)
+    ambient_color: bpy.props.FloatVectorProperty(name="Ambient", subtype="COLOR", size=3,
+                                                 default=(0.345, 0.353, 0.392), min=0.0, max=1.0)
     # Matches the kit's own "grass" material so the fill plane under the track
     # is invisible against the grass border baked into every road tile.
     ground_color: bpy.props.FloatVectorProperty(name="Ground", subtype="COLOR", size=3,
@@ -431,6 +444,44 @@ class KR_OT_add_racingline(Operator):
         return {"FINISHED"}
 
 
+class KR_OT_add_light(Operator):
+    bl_idname = "kr.add_light"
+    bl_label = "Add Light"
+    bl_description = ("Add a point or spot light at the 3D cursor. Blender's own lamps export "
+                      "directly: edit Power and Custom Distance to tune them")
+    bl_options = {"REGISTER", "UNDO"}
+
+    kind: EnumProperty(
+        name="Kind",
+        items=[("POINT", "Point", "Glows in all directions"),
+               ("SPOT", "Spot", "Cone, aimed along the lamp's -Z axis")],
+        default="POINT",
+    )
+    power: FloatProperty(name="Power (W)", default=200.0, min=0.0)
+    reach: FloatProperty(name="Range", default=6.0, min=0.1)
+
+    def execute(self, context):
+        data = bpy.data.lights.new(name="TrackLight", type=self.kind)
+        data.energy = self.power
+        data.color = (1.0, 0.86, 0.66)     # warm, like the kit's lamp posts
+        data.use_custom_distance = True
+        data.cutoff_distance = self.reach
+        if self.kind == "SPOT":
+            data.spot_size = math.radians(70.0)
+            data.spot_blend = 0.35
+
+        obj = bpy.data.objects.new("TrackLight", data)
+        obj.location = context.scene.cursor.location.copy()
+        context.collection.objects.link(obj)
+
+        bpy.ops.object.select_all(action="DESELECT")
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        self.report({"INFO"}, f"{self.kind.title()} light — power {self.power:.0f} W "
+                              f"exports as intensity {self.power / LIGHT_WATTS_PER_UNIT:.2f}")
+        return {"FINISHED"}
+
+
 class KR_OT_tag_collider(Operator):
     bl_idname = "kr.tag_collider"
     bl_label = "Tag As Collider"
@@ -502,12 +553,52 @@ def is_solid_prefab(name):
     return any(name.startswith(prefix) for prefix in SOLID_PREFIXES)
 
 
+def light_beam_direction(obj):
+    """Engine-space direction a Blender lamp shines, which is its local -Z."""
+    beam = obj.matrix_world.to_3x3() @ Vector((0.0, 0.0, -1.0))
+    beam.normalize()
+    return [round(beam.x, 5), round(beam.z, 5), round(-beam.y, 5)]
+
+
+def light_to_dict(obj):
+    """Convert a Blender lamp into a level light, or None for a sun."""
+    data = obj.data
+    if data.type == "SUN":
+        return None     # handled as the level's directional light instead
+
+    intensity = obj.get(PROP_INTENSITY)
+    if intensity is None:
+        intensity = max(data.energy, 0.0) / LIGHT_WATTS_PER_UNIT
+
+    reach = obj.get(PROP_RANGE)
+    if reach is None:
+        reach = data.cutoff_distance if getattr(data, "use_custom_distance", False) \
+            else LIGHT_DEFAULT_RANGE
+
+    entry = {
+        "type": "spot" if data.type == "SPOT" else "point",
+        "pos": to_engine_point(obj.matrix_world.translation),
+        "color": [int(round(min(max(c, 0.0), 1.0) * 255)) for c in data.color] + [255],
+        "intensity": round(float(intensity), 4),
+        "range": round(float(reach), 4),
+    }
+    if data.type == "SPOT":
+        # spot_size is the full cone angle; the engine wants half-angles, and
+        # spot_blend is the fraction of the cone taken up by the soft edge.
+        outer = math.degrees(data.spot_size) * 0.5
+        inner = outer * (1.0 - data.spot_blend)
+        entry["dir"] = light_beam_direction(obj)
+        entry["cone"] = [round(inner, 3), round(outer, 3)]
+    return entry
+
+
 def build_level_dict(context, report=None):
     scene = context.scene
     settings = scene.kr_level
 
-    props, colliders, spawns, checkpoints = [], [], [], []
+    props, colliders, spawns, checkpoints, lights = [], [], [], [], []
     racing_lines = []
+    sun = None
 
     for obj in scene.objects:
         if not obj.visible_get() and obj.hide_render:
@@ -515,6 +606,14 @@ def build_level_dict(context, report=None):
 
         kind = obj.get(PROP_TYPE)
         prefab = obj.get(PROP_PREFAB)
+
+        if obj.type == "LIGHT":
+            entry = light_to_dict(obj)
+            if entry is not None:
+                lights.append(entry)
+            elif sun is None:
+                sun = obj      # first sun lamp becomes the level's key light
+            continue
 
         if kind == "racingline":
             racing_lines.append(obj)
@@ -571,7 +670,18 @@ def build_level_dict(context, report=None):
         report({"WARNING"}, "No racing line in the scene: the engine cannot track laps without one")
 
     def colour(rgb):
-        return [int(round(c * 255)) for c in rgb] + [255]
+        return [int(round(min(max(c, 0.0), 1.0) * 255)) for c in rgb] + [255]
+
+    # A sun lamp in the scene overrides the default key light.
+    sun_direction = [-0.45, -1.0, -0.35]
+    sun_colour = [255, 250, 235, 255]
+    sun_intensity = round(settings.sun_intensity, 4)
+    if sun is not None:
+        sun_direction = light_beam_direction(sun)
+        sun_colour = colour(sun.data.color)
+        override = sun.get(PROP_INTENSITY)
+        sun_intensity = round(float(override) if override is not None
+                              else sun.data.energy / LIGHT_WATTS_PER_UNIT, 4)
 
     return {
         "format": LEVEL_FORMAT,
@@ -582,8 +692,12 @@ def build_level_dict(context, report=None):
             "track_width": round(settings.track_width, 4),
             "sky_color": colour(settings.sky_color),
             "ground_color": colour(settings.ground_color),
-            "sun_direction": [-0.45, -1.0, -0.35],
+            "ambient_color": colour(settings.ambient_color),
+            "sun_direction": sun_direction,
+            "sun_color": sun_colour,
+            "sun_intensity": sun_intensity,
         },
+        "lights": lights,
         "props": props,
         "colliders": colliders,
         "spawns": [
@@ -622,7 +736,8 @@ class KR_OT_export_level(Operator, ExportHelper):
         data = write_level(context, self.filepath, self.report)
         self.report({"INFO"},
                     f"{len(data['props'])} props, {len(data['waypoints'])} waypoints, "
-                    f"{len(data['colliders'])} colliders -> {os.path.basename(self.filepath)}")
+                    f"{len(data['colliders'])} colliders, {len(data['lights'])} lights "
+                    f"-> {os.path.basename(self.filepath)}")
         return {"FINISHED"}
 
 
@@ -648,7 +763,8 @@ class KR_OT_validate(Operator):
         else:
             self.report({"INFO"},
                         f"OK — {len(data['props'])} props, {len(data['spawns'])} spawns, "
-                        f"{len(data['waypoints'])} waypoints, {len(data['colliders'])} colliders")
+                        f"{len(data['waypoints'])} waypoints, {len(data['colliders'])} colliders, "
+                        f"{len(data['lights'])} lights")
         return {"FINISHED"}
 
 
@@ -687,6 +803,14 @@ class KR_PT_panel(Panel):
         row.operator(KR_OT_tag_collider.bl_idname, text="Clear Solid").clear = True
 
         box = layout.box()
+        box.label(text="Lighting", icon="LIGHT")
+        row = box.row(align=True)
+        row.operator(KR_OT_add_light.bl_idname, text="Point Light").kind = "POINT"
+        row.operator(KR_OT_add_light.bl_idname, text="Spot Light").kind = "SPOT"
+        box.prop(settings, "sun_intensity")
+        box.prop(settings, "ambient_color")
+
+        box = layout.box()
         box.label(text="Level Settings", icon="SETTINGS")
         box.prop(settings, "level_name")
         box.prop(settings, "laps")
@@ -711,6 +835,7 @@ CLASSES = (
     KR_OT_add_spawn,
     KR_OT_add_checkpoint,
     KR_OT_add_racingline,
+    KR_OT_add_light,
     KR_OT_tag_collider,
     KR_OT_export_level,
     KR_OT_validate,

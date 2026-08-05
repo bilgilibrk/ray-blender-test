@@ -4,6 +4,7 @@
 #   make PLATFORM=drm     build for a Raspberry Pi console (DRM/KMS + GLES2)
 #   make run              build and run
 #   make test             build and run the engine unit tests
+#   make shaders          validate the GLSL for both backends
 #   make level            regenerate the demo track through Blender
 #   make clean
 
@@ -15,7 +16,10 @@ BUILD    := build/$(PLATFORM)
 
 WARNINGS := -Wall -Wextra -Wno-unused-parameter -Wshadow -Wpointer-arith -Wcast-align \
             -Wstrict-prototypes -Wmissing-prototypes
-CFLAGS   := -std=c11 -O2 -g $(WARNINGS) \
+# -MMD -MP emit a .d file per object listing the headers it used, so editing a
+# header rebuilds everything that includes it. Without this, changing a struct
+# leaves stale objects reading fields at the wrong offsets.
+CFLAGS   := -std=c11 -O2 -g $(WARNINGS) -MMD -MP \
             -Iengine/include -Igame/include -I$(RAYLIB)/include
 LDLIBS   := -lm -lpthread -ldl -lrt
 
@@ -40,7 +44,7 @@ GAME_LIB   := $(filter-out $(BUILD)/game/src/main.o,$(GAME_OBJ))
 TARGET     := $(BUILD)/racer
 TEST_BIN   := $(BUILD)/tests
 
-.PHONY: all run clean test level engine dirs
+.PHONY: all run clean test level engine shaders dirs
 
 all: $(TARGET)
 
@@ -65,6 +69,11 @@ $(TEST_BIN): $(TEST_SRC) $(ENGINE_OBJ) $(GAME_LIB) $(RAYLIB_LIB)
 test: $(TEST_BIN)
 	./$(TEST_BIN)
 
+# Validates both GLSL variants. The GLES2 one cannot be exercised by running the
+# game on a machine with no display, so it is checked statically instead.
+shaders:
+	@tools/check_shaders.sh
+
 run: $(TARGET)
 	./$(TARGET)
 
@@ -73,3 +82,5 @@ level:
 
 clean:
 	rm -rf build
+
+-include $(ENGINE_OBJ:.o=.d) $(GAME_OBJ:.o=.d)

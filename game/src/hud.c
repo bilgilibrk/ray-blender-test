@@ -208,7 +208,7 @@ void HudDrawDebug(const Race *race, const HudStats *stats)
     char buffer[128];
     int y = 116;
 
-    Rectangle panel = { 16, 104, 300, 176 };
+    Rectangle panel = { 16, 104, 300, 196 };
     Panel(panel);
 
     snprintf(buffer, sizeof buffer, "%d fps   %d/%d chunks   %dk tris",
@@ -237,7 +237,11 @@ void HudDrawDebug(const Race *race, const HudStats *stats)
              player->progress.lap, player->progress.score);
     TextAt(buffer, 28, y, 16, kDim); y += 20;
 
-    snprintf(buffer, sizeof buffer, "audio %s   F1 debug  F2 shot  C camera",
+    snprintf(buffer, sizeof buffer, "%d lights   %s   audio %s",
+             stats->lightCount, stats->night ? "night" : "day",
              stats->audioActive ? "on" : "off");
+    TextAt(buffer, 28, y, 16, kDim); y += 20;
+
+    snprintf(buffer, sizeof buffer, "F1 debug  F2 shot  C camera  N night");
     TextAt(buffer, 28, y, 16, kDim);
 }

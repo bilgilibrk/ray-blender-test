@@ -12,6 +12,7 @@
 #include "raylib.h"
 
 #include "engine/level.h"
+#include "engine/light.h"
 #include "engine/spline.h"
 
 typedef struct RenderSettings {
@@ -19,13 +20,21 @@ typedef struct RenderSettings {
     Color skyColor;
     Color groundColor;
     Color ambient;
+    Color sunColor;
+    float sunIntensity;     // 0 leaves only ambient and the placed lights
     float fogDensity;       // 0 disables distance fog
 } RenderSettings;
 
 bool RenderInit(void);
 void RenderShutdown(void);
 void RenderSetSettings(const RenderSettings *settings);
+RenderSettings RenderGetSettings(void);
 RenderSettings RenderDefaultSettings(const Level *level);
+
+// Point and spot lights used by later draws. The set is borrowed, not copied,
+// so lights can be moved between frames (headlights, flashing beacons) without
+// telling the renderer again. Pass NULL to light with the sun alone.
+void RenderSetLights(const LightSet *lights);
 
 // --- static geometry -------------------------------------------------------
 

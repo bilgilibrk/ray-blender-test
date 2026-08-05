@@ -9,6 +9,7 @@
 //     --no-vsync          uncap the frame rate
 //     --autopilot         let the AI drive the player's car
 //     --debug             start with the debug overlay on
+//     --night             start at night, with the placed lights and headlights
 //     --frames N          quit after N frames (for automated runs)
 //     --shots a,b,c       screenshot on those frame numbers
 //     --shot-prefix P     screenshot filename prefix (default "shot")
@@ -26,6 +27,7 @@
 #include "engine/core.h"
 #include "engine/input.h"
 #include "engine/level.h"
+#include "engine/light.h"
 #include "engine/render.h"
 #include "engine/spline.h"
 
@@ -39,6 +41,11 @@
 #define BATCH_CHUNK_SIZE 6.0f
 #define MAX_SHOTS 16
 
+// Headlight placement, in car-local units.
+#define HEADLIGHT_FORWARD 0.30f
+#define HEADLIGHT_SIDE 0.10f
+#define HEADLIGHT_HEIGHT 0.17f
+
 typedef struct Options {
     const char *levelPath;
     const char *shotPrefix;
@@ -49,6 +56,7 @@ typedef struct Options {
     bool vsync;
     bool autopilot;
     bool debug;
+    bool night;
     int frameLimit;
     int shots[MAX_SHOTS];
     int shotCount;
@@ -67,6 +75,7 @@ static Options DefaultOptions(void)
         .vsync = true,
         .autopilot = false,
         .debug = false,
+        .night = false,
         .frameLimit = 0,
         .shotCount = 0,
     };
@@ -103,6 +112,7 @@ static bool ParseArgs(Options *options, int argc, char **argv)
         else if (!strcmp(a, "--no-vsync")) options->vsync = false;
         else if (!strcmp(a, "--autopilot")) options->autopilot = true;
         else if (!strcmp(a, "--debug")) options->debug = true;
+        else if (!strcmp(a, "--night")) options->night = true;
         else {
             fprintf(stderr, "racer: unknown option '%s'\n", a);
             return false;
@@ -151,6 +161,89 @@ static void DrawShadow(const Racer *racer, const CarTuning *tuning)
     DrawTriangle3D((Vector3){ corners[0].x, 0.012f, corners[0].y },
                    (Vector3){ corners[2].x, 0.012f, corners[2].y },
                    (Vector3){ corners[3].x, 0.012f, corners[3].y }, shade);
+}
+
+// --- lighting ---------------------------------------------------------------
+
+typedef struct Headlights {
+    int left;
+    int right;
+} Headlights;
+
+static Color ScaleColor(Color color, float factor)
+{
+    return (Color){
+        (unsigned char)Clamp(color.r * factor, 0.0f, 255.0f),
+        (unsigned char)Clamp(color.g * factor, 0.0f, 255.0f),
+        (unsigned char)Clamp(color.b * factor, 0.0f, 255.0f),
+        color.a,
+    };
+}
+
+// Dims the key light and sky so the placed lights and headlights carry the
+// scene. Prop colours are untouched — the shader darkens them.
+static RenderSettings NightSettings(RenderSettings day)
+{
+    RenderSettings night = day;
+    night.sunIntensity = day.sunIntensity * 0.10f;
+    night.sunColor = (Color){ 150, 170, 220, 255 };   // cool moonlight
+    night.ambient = ScaleColor(day.ambient, 0.28f);
+    night.skyColor = ScaleColor(day.skyColor, 0.16f);
+    night.fogDensity = day.fogDensity * 1.5f;
+    return night;
+}
+
+// Placed lights are dimmed rather than switched off during the day: a street
+// lamp does not light much at noon, but leaving a hint of the pool visible
+// makes it obvious the level has lighting in it at all.
+#define LIGHT_DAY_SCALE 0.30f
+
+static void ApplyLightMode(LightSet *lights, const float *baseIntensity, int levelLightCount,
+                           bool night)
+{
+    float scale = night ? 1.0f : LIGHT_DAY_SCALE;
+    for (int i = 0; i < levelLightCount && i < lights->count; i++) {
+        lights->lights[i].intensity = baseIntensity[i] * scale;
+    }
+}
+
+static void AddHeadlights(LightSet *lights, Headlights *out, int count)
+{
+    for (int i = 0; i < count; i++) {
+        Light beam = LightMakeSpot((Vector3){ 0 }, (Vector3){ 0, 0, 1 },
+                                   (Color){ 255, 244, 214, 255 }, 2.4f, 4.6f, 14.0f, 30.0f);
+        beam.enabled = false;   // switched on with night mode
+        out[i].left = LightSetAdd(lights, beam);
+        out[i].right = LightSetAdd(lights, beam);
+    }
+}
+
+// Re-aims each car's pair of beams from its current transform.
+static void UpdateHeadlights(LightSet *lights, const Headlights *slots, const Race *race,
+                             bool enabled)
+{
+    for (int i = 0; i < race->racerCount; i++) {
+        const Car *car = &race->racers[i].car;
+        Vector2 forward = CarForward(car);
+        Vector2 right = CarRight(car);
+        // Aim slightly down so the beam lands on the road ahead.
+        Vector3 direction = { forward.x, -0.22f, forward.y };
+
+        for (int side = 0; side < 2; side++) {
+            int index = side ? slots[i].right : slots[i].left;
+            Light *light = LightSetAt(lights, index);
+            if (!light) continue;
+
+            float lateral = side ? HEADLIGHT_SIDE : -HEADLIGHT_SIDE;
+            light->position = (Vector3){
+                car->position.x + forward.x * HEADLIGHT_FORWARD + right.x * lateral,
+                HEADLIGHT_HEIGHT,
+                car->position.y + forward.y * HEADLIGHT_FORWARD + right.y * lateral,
+            };
+            light->direction = Vector3Normalize(direction);
+            light->enabled = enabled;
+        }
+    }
 }
 
 static Vector3 LevelCentroid(const Spline *spline)
@@ -205,8 +298,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    RenderSettings settings = RenderDefaultSettings(&level);
-    RenderSetSettings(&settings);
+    RenderSettings daySettings = RenderDefaultSettings(&level);
+    RenderSettings nightSettings = NightSettings(daySettings);
+    bool night = options.night;
+    RenderSetSettings(night ? &nightSettings : &daySettings);
 
     StaticBatch batch;
     if (!StaticBatchBuild(&batch, &level, BATCH_CHUNK_SIZE)) {
@@ -224,6 +319,21 @@ int main(int argc, char **argv)
         return 1;
     }
     race.autopilot = options.autopilot;
+
+    // Level lights first, then two headlight slots per car appended after them.
+    static LightSet lights;
+    LightSetClear(&lights);
+    LightSetAddFromLevel(&lights, &level);
+    static float baseIntensity[LIGHTS_MAX];
+    int levelLightCount = lights.count;
+    for (int i = 0; i < levelLightCount; i++) baseIntensity[i] = lights.lights[i].intensity;
+
+    Headlights headlights[RACE_MAX_RACERS] = { 0 };
+    AddHeadlights(&lights, headlights, race.racerCount);
+    ApplyLightMode(&lights, baseIntensity, levelLightCount, night);
+    RenderSetLights(&lights);
+    TraceLog(LOG_INFO, "MAIN: %d lights (%d from level, %d headlights)",
+             lights.count, level.lightCount, race.racerCount * 2);
 
     const Racer *player = &race.racers[race.playerIndex];
     ChaseCamera camera;
@@ -245,6 +355,11 @@ int main(int argc, char **argv)
 
         if (in.pressed[ACTION_TOGGLE_DEBUG]) showDebug = !showDebug;
         if (in.pressed[ACTION_TOGGLE_CAMERA]) camera.rotateWithTarget = !camera.rotateWithTarget;
+        if (in.pressed[ACTION_TOGGLE_NIGHT]) {
+            night = !night;
+            RenderSetSettings(night ? &nightSettings : &daySettings);
+            ApplyLightMode(&lights, baseIntensity, levelLightCount, night);
+        }
         if (in.pressed[ACTION_QUIT]) break;
         if (in.pressed[ACTION_PAUSE]) paused = !paused;
         if (in.pressed[ACTION_RESET_CAR] && !paused) {
@@ -268,6 +383,8 @@ int main(int argc, char **argv)
             int steps = FixedStepperAdvance(&stepper, dt);
             for (int s = 0; s < steps; s++) RaceUpdate(&race, drive, stepper.step);
         }
+
+        UpdateHeadlights(&lights, headlights, &race, night);
 
         player = &race.racers[race.playerIndex];
         float speed01 = Clamp(player->car.speed / race.tuning.topSpeed, 0.0f, 1.0f);
@@ -305,6 +422,8 @@ int main(int argc, char **argv)
                 .totalChunks = batch.chunkCount,
                 .triangles = batch.totalTriangles,
                 .audioActive = AudioEngineAvailable(),
+                .lightCount = lights.count,
+                .night = night,
             };
             HudDrawDebug(&race, &stats);
         }

@@ -37,6 +37,18 @@ typedef struct LevelSpawn {
     float yawDeg;
 } LevelSpawn;
 
+// A light placed in the editor. Blender's own lamp objects export to these.
+typedef struct LevelLight {
+    Vector3 position;
+    Vector3 direction;      // spot only
+    Color color;
+    float intensity;
+    float range;
+    float innerConeDeg;
+    float outerConeDeg;
+    bool isSpot;
+} LevelLight;
+
 // Ordered centreline of the circuit; the loop is implicitly closed.
 typedef struct LevelWaypoint {
     Vector3 position;
@@ -56,6 +68,9 @@ typedef struct Level {
     Color skyColor;
     Color groundColor;
     Vector3 sunDirection;
+    Color sunColor;
+    float sunIntensity;
+    Color ambientColor;
     float defaultTrackWidth;
 
     LevelProp *props;             int propCount;
@@ -63,6 +78,7 @@ typedef struct Level {
     LevelSpawn *spawns;           int spawnCount;
     LevelWaypoint *waypoints;     int waypointCount;
     LevelCheckpoint *checkpoints; int checkpointCount;
+    LevelLight *lights;           int lightCount;
 
     Arena arena;                  // owns every array above
 } Level;

@@ -22,6 +22,7 @@ extern int g_verbose;
 void RunJsonTests(void);
 void RunSplineTests(void);
 void RunCollisionTests(void);
+void RunLightTests(void);
 void RunRaceTests(void);
 
 #endif // TESTS_H

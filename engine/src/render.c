@@ -8,6 +8,7 @@
 #include "rlgl.h"
 
 #include "engine/assets.h"
+#include "engine/light.h"
 
 #if defined(ENGINE_PLATFORM_DRM)
     #define ENGINE_GLSL_VERSION 100
@@ -21,102 +22,61 @@
 static struct {
     Shader shader;
     int locSunDir;
+    int locSunColor;
     int locAmbient;
     int locFogColor;
     int locFogDensity;
     int locCameraPos;
+    int locLightCount;
+    int locLightPosRange;
+    int locLightColor;
+    int locLightDir;
+
     RenderSettings settings;
+    const LightSet *lights;     // borrowed; the caller owns the storage
+    int uploadedCount;
+
+    Mesh groundMesh;            // unit quad on XZ, scaled per draw
+    Material sceneMaterial;
     bool ready;
 } g_render;
 
-// ---------------------------------------------------------------------------
-// Shaders. Embedded rather than loaded from disk so a level can be rendered
-// without any files beyond the models themselves.
-// ---------------------------------------------------------------------------
+// A single quad is enough: lighting is evaluated per fragment, so a large
+// ground plane still picks up every nearby lamp.
+static Mesh MakeGroundQuad(void)
+{
+    Mesh mesh = { 0 };
+    mesh.vertexCount = 6;
+    mesh.triangleCount = 2;
+    mesh.vertices = MemAlloc(sizeof(float) * 3 * 6);
+    mesh.normals = MemAlloc(sizeof(float) * 3 * 6);
+    if (!mesh.vertices || !mesh.normals) {
+        MemFree(mesh.vertices);
+        MemFree(mesh.normals);
+        return (Mesh){ 0 };
+    }
 
-#if ENGINE_GLSL_VERSION == 100
-static const char *kVertexShader =
-"#version 100                                     \n"
-"attribute vec3 vertexPosition;                   \n"
-"attribute vec3 vertexNormal;                     \n"
-"attribute vec4 vertexColor;                      \n"
-"uniform mat4 mvp;                                \n"
-"uniform mat4 matModel;                           \n"
-"uniform mat4 matNormal;                          \n"
-"varying vec4 fragColor;                          \n"
-"varying vec3 fragNormal;                         \n"
-"varying vec3 fragWorld;                          \n"
-"void main() {                                    \n"
-"    fragColor = vertexColor;                     \n"
-"    fragNormal = normalize(vec3(matNormal*vec4(vertexNormal, 0.0)));\n"
-"    fragWorld = vec3(matModel*vec4(vertexPosition, 1.0));           \n"
-"    gl_Position = mvp*vec4(vertexPosition, 1.0); \n"
-"}                                                \n";
+    const float corners[6][2] = {
+        { -0.5f, -0.5f }, { -0.5f, 0.5f }, { 0.5f, 0.5f },
+        { -0.5f, -0.5f }, { 0.5f, 0.5f }, { 0.5f, -0.5f },
+    };
+    for (int i = 0; i < 6; i++) {
+        mesh.vertices[i * 3 + 0] = corners[i][0];
+        mesh.vertices[i * 3 + 1] = 0.0f;
+        mesh.vertices[i * 3 + 2] = corners[i][1];
+        mesh.normals[i * 3 + 0] = 0.0f;
+        mesh.normals[i * 3 + 1] = 1.0f;
+        mesh.normals[i * 3 + 2] = 0.0f;
+    }
+    UploadMesh(&mesh, false);
+    return mesh;
+}
 
-static const char *kFragmentShader =
-"#version 100                                     \n"
-"precision mediump float;                         \n"
-"varying vec4 fragColor;                          \n"
-"varying vec3 fragNormal;                         \n"
-"varying vec3 fragWorld;                          \n"
-"uniform vec4 colDiffuse;                         \n"
-"uniform vec3 sunDir;                             \n"
-"uniform vec4 ambient;                            \n"
-"uniform vec4 fogColor;                           \n"
-"uniform float fogDensity;                        \n"
-"uniform vec3 cameraPos;                          \n"
-"void main() {                                    \n"
-"    vec3 n = normalize(fragNormal);              \n"
-"    float ndl = max(dot(n, -normalize(sunDir)), 0.0);                \n"
-"    float light = ambient.r + 0.62*ndl + 0.12*max(n.y, 0.0);         \n"
-"    vec4 base = fragColor*colDiffuse;            \n"
-"    vec3 lit = base.rgb*light;                   \n"
-"    float d = length(cameraPos - fragWorld)*fogDensity;              \n"
-"    float f = clamp(1.0 - exp(-d*d), 0.0, 1.0);  \n"
-"    gl_FragColor = vec4(mix(lit, fogColor.rgb, f), base.a);          \n"
-"}                                                \n";
-#else
-static const char *kVertexShader =
-"#version 330                                     \n"
-"in vec3 vertexPosition;                          \n"
-"in vec3 vertexNormal;                            \n"
-"in vec4 vertexColor;                             \n"
-"uniform mat4 mvp;                                \n"
-"uniform mat4 matModel;                           \n"
-"uniform mat4 matNormal;                          \n"
-"out vec4 fragColor;                              \n"
-"out vec3 fragNormal;                             \n"
-"out vec3 fragWorld;                              \n"
-"void main() {                                    \n"
-"    fragColor = vertexColor;                     \n"
-"    fragNormal = normalize(vec3(matNormal*vec4(vertexNormal, 0.0)));\n"
-"    fragWorld = vec3(matModel*vec4(vertexPosition, 1.0));           \n"
-"    gl_Position = mvp*vec4(vertexPosition, 1.0); \n"
-"}                                                \n";
-
-static const char *kFragmentShader =
-"#version 330                                     \n"
-"in vec4 fragColor;                               \n"
-"in vec3 fragNormal;                              \n"
-"in vec3 fragWorld;                               \n"
-"uniform vec4 colDiffuse;                         \n"
-"uniform vec3 sunDir;                             \n"
-"uniform vec4 ambient;                            \n"
-"uniform vec4 fogColor;                           \n"
-"uniform float fogDensity;                        \n"
-"uniform vec3 cameraPos;                          \n"
-"out vec4 finalColor;                             \n"
-"void main() {                                    \n"
-"    vec3 n = normalize(fragNormal);              \n"
-"    float ndl = max(dot(n, -normalize(sunDir)), 0.0);                \n"
-"    float light = ambient.r + 0.62*ndl + 0.12*max(n.y, 0.0);         \n"
-"    vec4 base = fragColor*colDiffuse;            \n"
-"    vec3 lit = base.rgb*light;                   \n"
-"    float d = length(cameraPos - fragWorld)*fogDensity;              \n"
-"    float f = clamp(1.0 - exp(-d*d), 0.0, 1.0);  \n"
-"    finalColor = vec4(mix(lit, fogColor.rgb, f), base.a);            \n"
-"}                                                \n";
-#endif
+// Shader source lives in its own file so tools/check_shaders.sh can compile the
+// GLES2 variant through glslangValidator: the DRM target cannot be run on a
+// machine with no display, and a shader that fails to compile would break it
+// entirely with nothing else to catch it.
+#include "scene_shader.inc"
 
 bool RenderInit(void)
 {
@@ -128,25 +88,42 @@ bool RenderInit(void)
     g_render.shader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocation(g_render.shader, "matModel");
     g_render.shader.locs[SHADER_LOC_MATRIX_NORMAL] = GetShaderLocation(g_render.shader, "matNormal");
     g_render.locSunDir     = GetShaderLocation(g_render.shader, "sunDir");
+    g_render.locSunColor   = GetShaderLocation(g_render.shader, "sunColor");
     g_render.locAmbient    = GetShaderLocation(g_render.shader, "ambient");
     g_render.locFogColor   = GetShaderLocation(g_render.shader, "fogColor");
     g_render.locFogDensity = GetShaderLocation(g_render.shader, "fogDensity");
     g_render.locCameraPos  = GetShaderLocation(g_render.shader, "cameraPos");
+
+    g_render.locLightCount    = GetShaderLocation(g_render.shader, "lightCount");
+    g_render.locLightPosRange = GetShaderLocation(g_render.shader, "lightPosRange");
+    g_render.locLightColor    = GetShaderLocation(g_render.shader, "lightColor");
+    g_render.locLightDir      = GetShaderLocation(g_render.shader, "lightDir");
 
     RenderSettings def = {
         .sunDirection = Vector3Normalize((Vector3){ -0.45f, -1.0f, -0.35f }),
         .skyColor = (Color){ 124, 176, 214, 255 },
         .groundColor = (Color){ 104, 152, 84, 255 },
         .ambient = (Color){ 88, 90, 100, 255 },
+        .sunColor = (Color){ 255, 250, 235, 255 },
+        .sunIntensity = 0.62f,
         .fogDensity = 0.012f,
     };
     RenderSetSettings(&def);
+
+    g_render.groundMesh = MakeGroundQuad();
+    g_render.sceneMaterial = LoadMaterialDefault();
+    g_render.sceneMaterial.shader = g_render.shader;
+
     g_render.ready = true;
     return true;
 }
 
 void RenderShutdown(void)
 {
+    if (g_render.groundMesh.vertexCount > 0) UnloadMesh(g_render.groundMesh);
+    // Detach first: the material does not own the shader.
+    g_render.sceneMaterial.shader = (Shader){ 0 };
+    if (g_render.sceneMaterial.maps) UnloadMaterial(g_render.sceneMaterial);
     if (g_render.shader.id != 0) UnloadShader(g_render.shader);
     memset(&g_render, 0, sizeof(g_render));
 }
@@ -157,7 +134,9 @@ RenderSettings RenderDefaultSettings(const Level *level)
         .sunDirection = level->sunDirection,
         .skyColor = level->skyColor,
         .groundColor = level->groundColor,
-        .ambient = (Color){ 88, 90, 100, 255 },
+        .ambient = level->ambientColor,
+        .sunColor = level->sunColor,
+        .sunIntensity = level->sunIntensity,
         .fogDensity = 0.010f,
     };
     return s;
@@ -171,14 +150,84 @@ void RenderSetSettings(const RenderSettings *settings)
     Vector3 sun = Vector3Normalize(settings->sunDirection);
     float ambient[4] = { settings->ambient.r / 255.0f, settings->ambient.g / 255.0f,
                          settings->ambient.b / 255.0f, 1.0f };
+    float sunColor[4] = { settings->sunColor.r / 255.0f, settings->sunColor.g / 255.0f,
+                          settings->sunColor.b / 255.0f, settings->sunIntensity };
     float fog[4] = { settings->skyColor.r / 255.0f, settings->skyColor.g / 255.0f,
                      settings->skyColor.b / 255.0f, 1.0f };
 
     SetShaderValue(g_render.shader, g_render.locSunDir, &sun, SHADER_UNIFORM_VEC3);
+    SetShaderValue(g_render.shader, g_render.locSunColor, sunColor, SHADER_UNIFORM_VEC4);
     SetShaderValue(g_render.shader, g_render.locAmbient, ambient, SHADER_UNIFORM_VEC4);
     SetShaderValue(g_render.shader, g_render.locFogColor, fog, SHADER_UNIFORM_VEC4);
     SetShaderValue(g_render.shader, g_render.locFogDensity, &settings->fogDensity,
                    SHADER_UNIFORM_FLOAT);
+}
+
+RenderSettings RenderGetSettings(void)
+{
+    return g_render.settings;
+}
+
+// ---------------------------------------------------------------------------
+// Light uploads
+// ---------------------------------------------------------------------------
+
+void RenderSetLights(const LightSet *lights)
+{
+    g_render.lights = lights;
+}
+
+// Uploads the lights that reach a bounding sphere. Called once per draw call,
+// so a car is lit by the lamps near the car and a batch chunk by the lamps near
+// that chunk, without either paying for the whole scene.
+static void UploadLightsFor(Vector3 center, float radius)
+{
+    if (g_render.shader.id == 0) return;
+
+    int count = 0;
+    int chosen[LIGHTS_PER_DRAW];
+    if (g_render.lights) {
+        count = LightSetSelect(g_render.lights, center, radius, chosen, LIGHTS_PER_DRAW);
+    }
+
+    // Skip the upload when nothing is lit and nothing was lit last time.
+    if (count == 0 && g_render.uploadedCount == 0) return;
+
+    float posRange[LIGHTS_PER_DRAW * 4] = { 0 };
+    float colors[LIGHTS_PER_DRAW * 4] = { 0 };
+    float dirs[LIGHTS_PER_DRAW * 4] = { 0 };
+
+    for (int i = 0; i < count; i++) {
+        const Light *light = &g_render.lights->lights[chosen[i]];
+        posRange[i * 4 + 0] = light->position.x;
+        posRange[i * 4 + 1] = light->position.y;
+        posRange[i * 4 + 2] = light->position.z;
+        posRange[i * 4 + 3] = light->range;
+
+        // Premultiply intensity so the shader does one multiply fewer.
+        colors[i * 4 + 0] = light->color.r / 255.0f * light->intensity;
+        colors[i * 4 + 1] = light->color.g / 255.0f * light->intensity;
+        colors[i * 4 + 2] = light->color.b / 255.0f * light->intensity;
+        // -2 marks a point light, which the shader tests for to skip the cone.
+        colors[i * 4 + 3] = (light->type == LIGHT_SPOT)
+            ? cosf(light->outerConeDeg * DEG2RAD) : -2.0f;
+
+        dirs[i * 4 + 0] = light->direction.x;
+        dirs[i * 4 + 1] = light->direction.y;
+        dirs[i * 4 + 2] = light->direction.z;
+        dirs[i * 4 + 3] = cosf(light->innerConeDeg * DEG2RAD);
+    }
+
+    SetShaderValue(g_render.shader, g_render.locLightCount, &count, SHADER_UNIFORM_INT);
+    if (count > 0) {
+        SetShaderValueV(g_render.shader, g_render.locLightPosRange, posRange,
+                        SHADER_UNIFORM_VEC4, count);
+        SetShaderValueV(g_render.shader, g_render.locLightColor, colors,
+                        SHADER_UNIFORM_VEC4, count);
+        SetShaderValueV(g_render.shader, g_render.locLightDir, dirs,
+                        SHADER_UNIFORM_VEC4, count);
+    }
+    g_render.uploadedCount = count;
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +492,15 @@ void StaticBatchDraw(StaticBatch *batch, Camera3D camera)
     Frustum frustum = FrustumFromMatrix(MatrixMultiply(view, proj));
 
     for (int i = 0; i < batch->chunkCount; i++) {
-        if (!FrustumTestBox(&frustum, batch->chunks[i].bounds)) continue;
+        BoundingBox bounds = batch->chunks[i].bounds;
+        if (!FrustumTestBox(&frustum, bounds)) continue;
+
+        Vector3 center = { (bounds.min.x + bounds.max.x) * 0.5f,
+                           (bounds.min.y + bounds.max.y) * 0.5f,
+                           (bounds.min.z + bounds.max.z) * 0.5f };
+        float radius = Vector3Distance(center, bounds.max);
+        UploadLightsFor(center, radius);
+
         DrawMesh(batch->chunks[i].mesh, batch->material, MatrixIdentity());
         batch->drawnLastFrame++;
     }
@@ -548,6 +605,10 @@ void RenderModelEuler(Model *model, Vector3 position, Vector3 rotationDeg, Vecto
                                                   rotationDeg.z * DEG2RAD })),
         MatrixTranslate(position.x, position.y, position.z));
 
+    // Approximate extent, used only to decide which lights are worth uploading.
+    float reach = 1.2f * fmaxf(fabsf(scale.x), fmaxf(fabsf(scale.y), fabsf(scale.z)));
+    UploadLightsFor(position, reach);
+
     for (int i = 0; i < model->meshCount; i++) {
         int matIndex = model->meshMaterial ? model->meshMaterial[i] : 0;
         // Material is a shallow struct whose `maps` array is shared with the
@@ -574,18 +635,18 @@ void RenderModelEuler(Model *model, Vector3 position, Vector3 rotationDeg, Vecto
 
 void RenderGroundPlane(Vector3 center, float size, Color color)
 {
-    // Drawn with the scene shader so it fogs out like everything else.
-    rlPushMatrix();
-    rlTranslatef(center.x, center.y, center.z);
-    rlBegin(RL_QUADS);
-        rlColor4ub(color.r, color.g, color.b, color.a);
-        rlNormal3f(0.0f, 1.0f, 0.0f);
-        rlVertex3f(-size / 2, 0.0f, -size / 2);
-        rlVertex3f(-size / 2, 0.0f,  size / 2);
-        rlVertex3f( size / 2, 0.0f,  size / 2);
-        rlVertex3f( size / 2, 0.0f, -size / 2);
-    rlEnd();
-    rlPopMatrix();
+    // Drawn as a real mesh rather than through rlgl's immediate mode: the
+    // immediate batch runs raylib's default shader, so the ground would ignore
+    // the sun and every placed light and stay flat bright at night.
+    if (g_render.groundMesh.vertexCount == 0) return;
+
+    Matrix transform = MatrixMultiply(MatrixScale(size, 1.0f, size),
+                                      MatrixTranslate(center.x, center.y, center.z));
+    UploadLightsFor(center, size * 0.5f);
+
+    Material material = g_render.sceneMaterial;
+    material.maps[MATERIAL_MAP_DIFFUSE].color = color;
+    DrawMesh(g_render.groundMesh, material, transform);
 }
 
 // ---------------------------------------------------------------------------

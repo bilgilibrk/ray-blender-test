@@ -12,6 +12,11 @@ faithful preview.
 
 ![gameplay](docs/gameplay.png)
 
+Press `N` for a night race — the lamp posts come up to full and every car
+switches on a pair of spot headlights:
+
+![night race](docs/night.png)
+
 ---
 
 ## Quick start
@@ -40,6 +45,7 @@ sudo apt-get install -y --no-install-recommends \
 | `A` `D` / `←` `→` | Steer | | `C` | Toggle rotating / north-up camera |
 | `Space` | Handbrake | | `F1` | Debug overlay |
 | `Esc` | Quit | | `F2` | Screenshot |
+| | | | `N` | Toggle day / night |
 
 A gamepad works too: left stick steers, triggers drive and brake.
 
@@ -52,6 +58,7 @@ A gamepad works too: left stick steers, triggers drive and brake.
 --fullscreen        borderless fullscreen
 --no-audio          skip the audio device
 --autopilot         let the AI drive the player's car (attract mode)
+--night             start at night, lamp posts and headlights lighting the scene
 --debug             start with the debug overlay
 --frames N          quit after N frames
 --shots a,b,c       screenshot on those frames, with --shot-prefix
@@ -89,6 +96,7 @@ engine/          reusable, game-agnostic
   level.*        level file -> props, colliders, spawns, waypoints, checkpoints
   spline.*       closed centre line: arc-length queries, nearest point, width
   collide.*      oriented boxes on XZ, SAT, uniform-grid broadphase
+  light.*        point and spot lights, per-draw relevance selection
   render.*       static batching, frustum culling, lighting shader, chase camera
   assets.*       name-keyed model/texture/sound cache
   audio.*        procedurally synthesised engine note, tyre scrub, beeps
@@ -126,6 +134,19 @@ speed drop. Solid objects (barriers, trees, grandstands) are real colliders.
 
 **Fixed timestep.** Physics runs at 120 Hz regardless of frame rate.
 
+**Lighting.** One directional key light plus any number of point and spot
+lights, forward shaded. A scene can hold up to 64 lights, but only the eight
+most relevant to whatever is being drawn are uploaded — chosen per batch chunk,
+per car and for the ground plane — so fragment cost is fixed and the uniform
+budget stays small enough for GLES2 on the Pi. Lights that cannot reach an
+object are skipped entirely, and with no lights in range the loop exits on its
+first iteration, so an unlit level costs nothing.
+
+Placed lights are dimmed to 30% during the day and come up to full at night,
+which is why the lamp posts read as subtle warm pools in daylight and carry the
+scene once you press `N`. Each car also has a pair of spot headlights that
+follow its transform; they switch on with night mode.
+
 ---
 
 ## Authoring a level in Blender
@@ -151,9 +172,19 @@ The fastest way in is to open `levels/circuit01.blend` and edit the demo circuit
 5. **Mark obstacles.** Scenery prefabs (barriers, trees, grandstands…) get
    colliders automatically. *Tag Solid* forces one onto any other object, and
    tagging an object with no prefab turns it into an invisible blocking volume.
-6. **Check and export.** *Validate Level* reports anything missing; *Export
+6. **Light it.** *Point Light* / *Spot Light* drop a lamp at the cursor, but any
+   Blender lamp exports — including ones you add through Blender's own *Add ▸
+   Light* menu. Tune **Power** and **Custom Distance** in the light's data
+   properties; a **Sun** lamp becomes the level's key light, taking its
+   direction, colour and strength. *Sun* and *Ambient* in the panel set the
+   daylight balance.
+7. **Check and export.** *Validate Level* reports anything missing; *Export
    Level* writes the JSON. Level name, lap count, track width and colours live in
    the same panel.
+
+Blender measures light power in watts and the engine wants a small unitless
+brightness, so the exporter divides Power by 100. A `kr_intensity` custom
+property overrides that outright, and `kr_range` overrides the reach.
 
 Rebuild the demo track from scratch with:
 
@@ -187,9 +218,12 @@ at placement time instead (see `place_centred`).
   "settings": {
     "laps": 3,
     "track_width": 0.69,          // drivable width, world units
-    "sky_color":    [124, 176, 214, 255],
-    "ground_color": [77, 143, 110, 255],
-    "sun_direction": [-0.45, -1.0, -0.35]
+    "sky_color":     [124, 176, 214, 255],
+    "ground_color":  [77, 143, 110, 255],
+    "ambient_color": [88, 90, 100, 255],
+    "sun_direction": [-0.45, -1.0, -0.35],
+    "sun_color":     [255, 250, 235, 255],
+    "sun_intensity": 0.62
   },
   "props": [                       // visual only
     { "model": "roadStraight",     // assets/models/<model>.glb
@@ -200,6 +234,13 @@ at placement time instead (see `place_centred`).
   ],
   "colliders": [                   // solid, solved on the XZ plane
     { "pos": [0, 0.06, 0], "half": [0.125, 0.06], "height": 0.13, "yaw": 90 }
+  ],
+  "lights": [                      // point and spot lights
+    { "type": "point", "pos": [1.2, 0.72, 8.0],
+      "color": [255, 219, 158, 255], "intensity": 2.1, "range": 3.0 },
+    { "type": "spot",  "pos": [-1.4, 2.3, 8.5], "dir": [1, -1.5, 0],
+      "color": [255, 242, 217, 255], "intensity": 3.4, "range": 5.2,
+      "cone": [23.65, 43.0] }      // inner and outer half-angles, degrees
   ],
   "spawns":      [ { "pos": [0.15, 0, 6], "yaw": 0 } ],
   "waypoints":   [ { "pos": [0.15, 0, 0], "width": 0.69 } ],   // ordered, closed

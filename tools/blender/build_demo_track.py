@@ -330,11 +330,12 @@ def scatter_scenery(centre_line, rng):
             model = "barrierRed" if (i // 3) % 2 == 0 else "barrierWhite"
             place_centred(model, spot, theta + math.pi / 2)
 
-    # Trees, tents and grandstands scattered clear of the track.
+    # Trees, tents and grandstands scattered clear of the track. Light posts are
+    # not in here: they are placed deliberately, with a lamp attached.
     scenery = [
         ("treeLarge", 26, 2.0), ("treeSmall", 22, 1.8), ("tent", 6, 3.0),
         ("tentLong", 4, 3.2), ("grandStand", 5, 3.4), ("grandStandCovered", 3, 3.6),
-        ("lightPostLarge", 10, 1.6), ("pylon", 18, 1.1),
+        ("pylon", 18, 1.1),
     ]
     for model, amount, clearance in scenery:
         placed = 0
@@ -348,6 +349,61 @@ def scatter_scenery(centre_line, rng):
             placed += 1
 
 
+def place_lamp(centre_xz, height, energy, reach, colour=(1.0, 0.86, 0.62),
+               kind="POINT", direction=None, cone=(70.0, 0.35), name="Lamp"):
+    """Create a Blender lamp at an engine-space position.
+
+    Blender lamps export straight through the add-on, so the demo track is lit
+    with exactly the same data path an artist would use by hand.
+    """
+    data = bpy.data.lights.new(name=name, type=kind)
+    data.energy = energy
+    data.color = colour
+    data.use_custom_distance = True
+    data.cutoff_distance = reach
+    if kind == "SPOT":
+        data.spot_size = math.radians(cone[0])
+        data.spot_blend = cone[1]
+
+    obj = bpy.data.objects.new(name, data)
+    obj.location = Vector((centre_xz[0], -centre_xz[1], height))
+    if kind == "SPOT" and direction is not None:
+        # A lamp shines along its local -Z; point that at `direction`, which is
+        # given in engine space as (x, y, z).
+        beam = Vector((direction[0], -direction[2], direction[1])).normalized()
+        obj.rotation_euler = beam.to_track_quat("-Z", "Y").to_euler()
+    bpy.context.collection.objects.link(obj)
+    return obj
+
+
+def place_light_posts(centre_line, rng, spacing=13, offset=1.05):
+    """Line the circuit with lamp posts, each carrying a real point light."""
+    count = len(centre_line)
+    placed = 0
+    for i in range(0, count, spacing):
+        p = centre_line[i]
+        nxt = centre_line[(i + 1) % count]
+        tangent = (nxt[0] - p[0], nxt[1] - p[1])
+        length = math.hypot(*tangent) or 1.0
+        tangent = (tangent[0] / length, tangent[1] / length)
+        left = (-tangent[1], tangent[0])
+        side = 1 if (placed % 2 == 0) else -1
+
+        spot = (p[0] + left[0] * offset * side, p[1] + left[1] * offset * side)
+        if distance_to_line(spot, centre_line) < BARRIER_CLEARANCE + 0.2:
+            continue
+
+        # Face the post across the track so its head overhangs the tarmac.
+        theta = math.atan2(-left[0] * side, -left[1] * side)
+        place_centred("lightPostLarge", spot, theta)
+
+        # The lamp head sits at the top of the post, just over the track side.
+        head = (spot[0] - left[0] * 0.18 * side, spot[1] - left[1] * 0.18 * side)
+        place_lamp(head, 0.72, energy=210.0, reach=3.0, name=f"LampPost.{placed:02d}")
+        placed += 1
+    return placed
+
+
 def add_start_dressing(start_cell, heading, centre_line):
     """Checkered flags and a banner tower framing the finish line."""
     theta = math.atan2(heading[0], heading[1])
@@ -359,6 +415,14 @@ def add_start_dressing(start_cell, heading, centre_line):
                   (start_cell[0] + left[0] * 1.5, start_cell[1] + left[1] * 1.5), theta)
     place_centred("grandStandCoveredRound",
           (start_cell[0] - left[0] * 2.4, start_cell[1] - left[1] * 2.4), theta + math.pi)
+
+    # Floodlights angled down onto the start/finish line from both sides.
+    for side in (-1, 1):
+        spot = (start_cell[0] + left[0] * 1.7 * side, start_cell[1] + left[1] * 1.7 * side)
+        aim = (-left[0] * side, -1.5, -left[1] * side)
+        place_lamp(spot, 2.3, energy=340.0, reach=5.2, colour=(1.0, 0.95, 0.85),
+                   kind="SPOT", direction=aim, cone=(86.0, 0.45),
+                   name=f"StartFlood.{'L' if side < 0 else 'R'}")
 
 
 def add_racing_line(centre_line, width):
@@ -449,6 +513,10 @@ def main():
     settings.track_width = 0.69
     settings.waypoint_spacing = 0.45
     settings.auto_colliders = True
+    # Daylight balance. The lamp posts are dimmed by the game during the day
+    # and come up to full at night; run with --night to see them carry the scene.
+    settings.sun_intensity = 0.62
+    settings.ambient_color = (0.345, 0.353, 0.392)
 
     centre_line, straight_cells = build_track()
     print(f"[track] {len(centre_line)} centre-line points, {len(straight_cells)} straight tiles")
@@ -461,6 +529,8 @@ def main():
                                     (centre_line[i][1] - start_cell[1]) ** 2)
 
     add_start_dressing(start_cell, heading, centre_line)
+    lamps = place_light_posts(centre_line, rng)
+    print(f"[track] {lamps} lamp posts")
     scatter_scenery(centre_line, rng)
     add_racing_line(centre_line, settings.track_width)
     add_spawns(centre_line, start_index)
@@ -471,7 +541,7 @@ def main():
     print(f"[export] {OUT_JSON}")
     print(f"[export] props={len(data['props'])} colliders={len(data['colliders'])} "
           f"spawns={len(data['spawns'])} waypoints={len(data['waypoints'])} "
-          f"checkpoints={len(data['checkpoints'])}")
+          f"checkpoints={len(data['checkpoints'])} lights={len(data['lights'])}")
 
     bpy.ops.wm.save_as_mainfile(filepath=OUT_BLEND)
     print(f"[export] {OUT_BLEND}")
