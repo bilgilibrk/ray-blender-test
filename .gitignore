@@ -1,0 +1,12 @@
+# Build output
+build/
+
+# Third-party sources and compiled libraries, restored by tools/setup.sh
+vendor/
+
+# Blender's rolling backup of the .blend
+*.blend1
+
+# Screenshots dropped by F2 or --shots
+shot-*.png
+*.png.tmp
