@@ -309,6 +309,20 @@ int main(int argc, char **argv)
     bool night = options.night;
     RenderSetSettings(night ? &nightSettings : &daySettings);
 
+    // The track's own elevation range drives the relief tint, and both the
+    // batch and the terrain have to be told before they bake their vertices.
+    {
+        float lowest = 1e30f, highest = -1e30f;
+        for (int i = 0; i < spline.count; i++) {
+            float y = spline.samples[i].position.y;
+            if (y < lowest) lowest = y;
+            if (y > highest) highest = y;
+        }
+        RenderSetReliefRange(lowest, highest);
+        TraceLog(LOG_INFO, "MAIN: track climbs %.2f units (%.2f to %.2f)",
+                 (double)(highest - lowest), (double)lowest, (double)highest);
+    }
+
     StaticBatch batch;
     if (!StaticBatchBuild(&batch, &level, BATCH_CHUNK_SIZE)) {
         TraceLog(LOG_ERROR, "MAIN: static batch build failed");

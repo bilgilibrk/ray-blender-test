@@ -14,6 +14,23 @@
 // hundreds of megabytes of ground.
 #define TERRAIN_MAX_SAMPLES (512 * 512)
 
+// How much steeper the ground is pretended to be when shading relief. The
+// camera looks almost straight down, where a real 17% slope tilts its normal
+// by only 10 degrees and lights identically to the flat around it.
+#define TERRAIN_RELIEF_EXAGGERATION 5.0f
+
+// Deepest the relief shading is allowed to darken the ground. Vertex colours
+// multiply the material colour, so shading can only ever subtract light —
+// anything above 1.0 would clip to white and flatten the crests back out.
+#define TERRAIN_RELIEF_DEPTH 0.34f
+
+// Relief is lit from much lower than the real sun so that slopes separate into
+// a lit face and a shaded one. Points towards the light, not along it.
+static Vector3 ReliefLightDirection(void)
+{
+    return Vector3Normalize((Vector3){ 0.55f, 0.62f, 0.42f });
+}
+
 TerrainSettings TerrainDefaultSettings(Color groundColor)
 {
     TerrainSettings s = {
@@ -122,12 +139,6 @@ bool TerrainBuild(Terrain *terrain, const Spline *spline, const TerrainSettings 
         }
     }
 
-    float lowest = 1e30f, highest = -1e30f;
-    for (int i = 0; i < sampleCount; i++) {
-        if (terrain->heights[i] < lowest) lowest = terrain->heights[i];
-        if (terrain->heights[i] > highest) highest = terrain->heights[i];
-    }
-
     // --- build chunk meshes ---------------------------------------------------
     int chunksX = (terrain->gridX + TERRAIN_CHUNK_CELLS - 1) / TERRAIN_CHUNK_CELLS;
     int chunksZ = (terrain->gridZ + TERRAIN_CHUNK_CELLS - 1) / TERRAIN_CHUNK_CELLS;
@@ -137,6 +148,8 @@ bool TerrainBuild(Terrain *terrain, const Spline *spline, const TerrainSettings 
         terrain->heights = NULL;
         return false;
     }
+
+    Vector3 reliefLight = ReliefLightDirection();
 
     int live = 0;
     for (int cz = 0; cz < chunksZ; cz++) {
@@ -183,12 +196,29 @@ bool TerrainBuild(Terrain *terrain, const Spline *spline, const TerrainSettings 
                         mesh.normals[out * 3 + 1] = n.y;
                         mesh.normals[out * 3 + 2] = n.z;
 
-                        // Shade by height. Seen from almost directly above, a
-                        // slope's normal barely changes, so lighting alone
-                        // leaves hills invisible; tinting hollows darker and
-                        // crests lighter is what makes the relief read.
-                        float t = (highest > lowest) ? (v.y - lowest) / (highest - lowest) : 0.5f;
-                        float shade = 0.84f + 0.30f * t;
+                        // Seen from almost directly above, a slope's normal
+                        // barely tilts and the scene lighting leaves hills
+                        // invisible. Two cartographic tricks stand in for it,
+                        // baked into the vertex colours:
+                        //
+                        //   height tint — hollows darker, crests lighter, which
+                        //                 carries the broad shape of the land
+                        //   hillshade   — the normal steepened well past
+                        //                 reality and lit from a low angle,
+                        //                 which gives each slope a lit face and
+                        //                 a shaded one
+                        float t = RenderReliefHeight01(v.y);
+
+                        Vector3 steep = Vector3Normalize((Vector3){
+                            n.x * TERRAIN_RELIEF_EXAGGERATION, 1.0f,
+                            n.z * TERRAIN_RELIEF_EXAGGERATION });
+                        // Measured against level ground, so flat terrain lands
+                        // at zero and keeps the material colour untouched.
+                        float hillshade = Vector3DotProduct(steep, reliefLight) - reliefLight.y;
+
+                        float relief = Clamp(0.55f * (2.0f * t - 1.0f) + 1.5f * hillshade,
+                                             -1.0f, 1.0f);
+                        float shade = 1.0f - TERRAIN_RELIEF_DEPTH * (1.0f - relief) * 0.5f;
                         mesh.colors[out * 4 + 0] = (unsigned char)Clamp(255.0f * shade, 0.0f, 255.0f);
                         mesh.colors[out * 4 + 1] = (unsigned char)Clamp(255.0f * shade, 0.0f, 255.0f);
                         mesh.colors[out * 4 + 2] = (unsigned char)Clamp(255.0f * shade, 0.0f, 255.0f);

@@ -38,8 +38,27 @@ static struct {
 
     Mesh groundMesh;            // unit quad on XZ, scaled per draw
     Material sceneMaterial;
+    float reliefLow, reliefHigh;
     bool ready;
 } g_render;
+
+// How far the height tint may darken a baked prop. Vertex colours multiply the
+// material colour, so this can only ever subtract light — going above 1.0 would
+// clip to white and flatten the crests back out.
+#define RELIEF_PROP_DEPTH 0.30f
+
+void RenderSetReliefRange(float lowest, float highest)
+{
+    g_render.reliefLow = lowest;
+    g_render.reliefHigh = highest;
+}
+
+float RenderReliefHeight01(float y)
+{
+    float span = g_render.reliefHigh - g_render.reliefLow;
+    if (span <= 1e-5f) return 0.5f;
+    return Clamp((y - g_render.reliefLow) / span, 0.0f, 1.0f);
+}
 
 // A single quad is enough: lighting is evaluated per fragment, so a large
 // ground plane still picks up every nearby lamp.
@@ -313,6 +332,11 @@ static void EmitProp(ChunkBuild *chunk, const LevelProp *prop)
                 n = Vector3Normalize(Vector3Transform(n, normalMat));
             }
 
+            // Tint by world height, matching the ground, so the road darkens
+            // into a dip and lightens over a crest instead of reading as one
+            // flat ribbon from above.
+            float shade = 1.0f - RELIEF_PROP_DEPTH * (1.0f - RenderReliefHeight01(p.y));
+
             int o = chunk->written;
             if (o >= chunk->vertexCount) return;   // sizing pass guarantees space
             chunk->vertices[o * 3 + 0] = p.x;
@@ -321,9 +345,9 @@ static void EmitProp(ChunkBuild *chunk, const LevelProp *prop)
             chunk->normals[o * 3 + 0] = n.x;
             chunk->normals[o * 3 + 1] = n.y;
             chunk->normals[o * 3 + 2] = n.z;
-            chunk->colors[o * 4 + 0] = r;
-            chunk->colors[o * 4 + 1] = g;
-            chunk->colors[o * 4 + 2] = b;
+            chunk->colors[o * 4 + 0] = (unsigned char)((float)r * shade);
+            chunk->colors[o * 4 + 1] = (unsigned char)((float)g * shade);
+            chunk->colors[o * 4 + 2] = (unsigned char)((float)b * shade);
             chunk->colors[o * 4 + 3] = a;
             chunk->written++;
 

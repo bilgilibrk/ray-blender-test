@@ -36,6 +36,22 @@ RenderSettings RenderDefaultSettings(const Level *level);
 // telling the renderer again. Pass NULL to light with the sun alone.
 void RenderSetLights(const LightSet *lights);
 
+// --- relief shading ----------------------------------------------------------
+//
+// A camera looking almost straight down cannot show elevation on its own: a
+// 17% slope tilts its normal by ten degrees and so lights almost exactly like
+// the flat beside it. Everything baked into a mesh is therefore tinted by how
+// high it sits, dips darkening and crests lightening, which is what lets a
+// climb read as a climb from above.
+//
+// Set the level's height range once, before building the terrain or the static
+// batch, so the road and the ground either side of it shade together.
+void RenderSetReliefRange(float lowest, float highest);
+
+// Where `y` sits in that range: 0 at the bottom, 1 at the top. Returns 0.5 —
+// a neutral tint — until a range has been set.
+float RenderReliefHeight01(float y);
+
 // --- culling and lit draws --------------------------------------------------
 
 typedef struct Frustum {
