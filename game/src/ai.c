@@ -5,9 +5,12 @@
 
 #include "raymath.h"
 
-// How far ahead the corner-severity probes sit, in world units.
-#define AI_PROBE_NEAR 0.9f
-#define AI_PROBE_FAR  3.4f
+// The road ahead is sampled at this spacing, this many times, to measure how
+// much it turns. Two fixed probes are not enough: a tight hairpin is shorter
+// than the gap between them, so both can land past the corner and report a
+// straight road right as the car arrives at it.
+#define AI_PROBE_STEP 0.55f
+#define AI_PROBE_COUNT 7
 
 void AIDriverInit(AIDriver *ai, float skill, float aggression, float preferredOffset,
                   unsigned int seed)
@@ -44,16 +47,38 @@ CarInput AIThink(AIDriver *ai, const Car *car, const CarTuning *tuning,
     CarInput input = { 0 };
     if (spline->count < 2) return input;
 
-    Vector3 here = { car->position.x, 0.0f, car->position.y };
+    Vector3 here = { car->position.x, car->height, car->position.y };
     SplineQuery q = SplineClosest(spline, here, hint);
 
-    // --- how hard is the next corner ---------------------------------------
-    SplineSample near = SplineSampleAt(spline, q.distance + AI_PROBE_NEAR);
-    SplineSample far = SplineSampleAt(spline, q.distance + AI_PROBE_FAR);
-    Vector2 nearDir = { near.tangent.x, near.tangent.z };
-    Vector2 farDir = { far.tangent.x, far.tangent.z };
-    float bendAngle = AngleToRight(nearDir, farDir);   // positive: track turns right
-    float corner01 = Clamp(fabsf(bendAngle) / (PI * 0.5f), 0.0f, 1.0f);
+    // --- how hard is the road ahead -----------------------------------------
+    // Walk a set of probes and accumulate how much the track turns. The total
+    // catches a corner anywhere in the window; the tightest single step gives
+    // the local radius, which is what actually limits corner speed.
+    float totalTurn = 0.0f;
+    float signedTurn = 0.0f;
+    float minRadius = 1e30f;
+
+    SplineSample probe = SplineSampleAt(spline, q.distance + AI_PROBE_STEP);
+    Vector2 previousDir = { probe.tangent.x, probe.tangent.z };
+    Vector2 firstDir = previousDir;
+
+    for (int i = 2; i <= AI_PROBE_COUNT; i++) {
+        probe = SplineSampleAt(spline, q.distance + AI_PROBE_STEP * (float)i);
+        Vector2 dir = { probe.tangent.x, probe.tangent.z };
+        float step = AngleToRight(previousDir, dir);
+
+        totalTurn += fabsf(step);
+        signedTurn += step;
+        if (fabsf(step) > 1e-4f) {
+            float radius = AI_PROBE_STEP / fabsf(step);
+            if (radius < minRadius) minRadius = radius;
+        }
+        previousDir = dir;
+    }
+    (void)firstDir;
+
+    float bendAngle = signedTurn;                      // positive: turns right
+    float corner01 = Clamp(totalTurn / (PI * 0.5f), 0.0f, 1.0f);
 
     // --- choose a racing line ------------------------------------------------
     // Move towards the inside of the corner to clip the apex, scaled by skill.
@@ -109,6 +134,18 @@ CarInput AIThink(AIDriver *ai, const Car *car, const CarTuning *tuning,
     // --- pace -------------------------------------------------------------------
     float cornerScale = 1.0f - 0.52f * corner01 * (1.15f - 0.3f * ai->aggression);
     float targetSpeed = tuning->topSpeed * cornerScale * (0.80f + 0.20f * ai->skill);
+
+    // Hard limit from the steering itself: following a radius r needs a yaw
+    // rate of v/r, and the car cannot exceed maxYawRate. Without this the AI
+    // arrives at a tight hairpin far too fast, understeers straight on and gets
+    // stuck against whatever is on the outside.
+    if (minRadius < 1e29f) {
+        float physicalLimit = tuning->maxYawRate * minRadius * 0.85f;
+        if (physicalLimit < targetSpeed) targetSpeed = physicalLimit;
+    }
+
+    // A climb bleeds speed anyway, so do not also brake for the corner beyond it.
+    targetSpeed = fmaxf(targetSpeed, 1.1f);
 
     // Running wide costs grip, so ease off until the car is back on line.
     if (fabsf(q.lateral) > q.halfWidth) targetSpeed *= 0.72f;

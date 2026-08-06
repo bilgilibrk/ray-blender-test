@@ -15,9 +15,10 @@
 
 typedef struct SplineSample {
     Vector3 position;
-    Vector3 tangent;        // unit, points down-track
+    Vector3 tangent;        // unit and horizontal, points down-track
     float width;            // drivable half-width is width * 0.5f
-    float distance;         // arc length from sample 0
+    float distance;         // arc length from sample 0, measured on the ground
+    float grade;            // rise over run: +0.1 climbs one unit every ten
 } SplineSample;
 
 typedef struct Spline {
@@ -36,11 +37,12 @@ void SplineFree(Spline *spline);
 // (pass a negative value for a full search) and is updated in place; the
 // windowed search around it keeps per-frame queries cheap.
 typedef struct SplineQuery {
-    Vector3 position;       // closest point on the centreline
-    Vector3 tangent;
+    Vector3 position;       // closest point on the centreline, including height
+    Vector3 tangent;        // horizontal
     float distance;         // arc length of that point (lap progress)
     float lateral;          // signed offset from the centreline, + is left
     float halfWidth;        // drivable half-width there
+    float grade;            // slope of the track under this point
     int index;              // sample index the result came from
 } SplineQuery;
 

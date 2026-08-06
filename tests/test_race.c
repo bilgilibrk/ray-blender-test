@@ -11,6 +11,7 @@
 #include "engine/level.h"
 #include "engine/spline.h"
 
+#include "game/car.h"
 #include "game/race.h"
 
 #include "tests.h"
@@ -116,6 +117,39 @@ void RunRaceTests(void)
         }
     }
     CHECK(blocking == 0, "%d collider(s) intrude on the racing surface", blocking);
+
+    // --- how fast can the circuit actually be driven? -------------------------
+    // Corner radius caps speed at maxYawRate * radius, so a layout can be
+    // accidentally undriveable no matter how good the AI is. Report the profile.
+    {
+        CarTuning tuning = CarDefaultTuning();
+        const float step = 0.55f;
+        float worstRadius = 1e30f;
+        float worstAt = 0.0f;
+        float slowSum = 0.0f;
+        int slowSamples = 0;
+
+        for (float d = 0.0f; d < spline.length; d += 0.25f) {
+            SplineSample a = SplineSampleAt(&spline, d);
+            SplineSample b = SplineSampleAt(&spline, d + step);
+            float turn = fabsf(atan2f(a.tangent.z * b.tangent.x - a.tangent.x * b.tangent.z,
+                                      a.tangent.x * b.tangent.x + a.tangent.z * b.tangent.z));
+            float radius = (turn > 1e-4f) ? step / turn : 1e30f;
+            if (radius < worstRadius) { worstRadius = radius; worstAt = d; }
+
+            float cap = tuning.maxYawRate * radius;
+            if (cap < tuning.topSpeed) { slowSum += cap; slowSamples++; }
+        }
+        printf("  tightest radius %.2f at arc %.1f (caps speed at %.2f u/s); "
+               "%d%% of the lap is corner-limited\n",
+               (double)worstRadius, (double)worstAt,
+               (double)(tuning.maxYawRate * worstRadius),
+               (int)(100.0f * (float)slowSamples / (spline.length / 0.25f)));
+
+        CHECK(tuning.maxYawRate * worstRadius > 1.8f,
+              "tightest corner (radius %.2f) caps speed at %.2f u/s — undriveable",
+              (double)worstRadius, (double)(tuning.maxYawRate * worstRadius));
+    }
 
     // --- spawn sanity -------------------------------------------------------
     for (int i = 0; i < level.spawnCount; i++) {

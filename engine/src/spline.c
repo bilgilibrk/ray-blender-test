@@ -8,21 +8,30 @@
 // How far either side of the hint a windowed nearest-sample search looks.
 #define SPLINE_SEARCH_WINDOW 24
 
+// Centripetal Catmull-Rom, evaluated with Barry-Goldman.
+//
+// The uniform form assumes the control points are evenly spaced. A track's are
+// not — a hand-drawn racing line, or an exporter that thins arcs harder than
+// straights, leaves spans of very different lengths — and where the spacing
+// jumps the uniform curve overshoots. That shows up as a phantom hairpin in the
+// curvature, which the AI dutifully brakes for. Knot spacing of sqrt(distance)
+// removes it, and also guarantees no cusps or self-intersections within a span.
 static Vector3 CatmullRom(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, float t)
 {
-    float t2 = t * t;
-    float t3 = t2 * t;
-    Vector3 r;
-    r.x = 0.5f * ((2 * p1.x) + (-p0.x + p2.x) * t +
-                  (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
-                  (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
-    r.y = 0.5f * ((2 * p1.y) + (-p0.y + p2.y) * t +
-                  (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
-                  (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
-    r.z = 0.5f * ((2 * p1.z) + (-p0.z + p2.z) * t +
-                  (2 * p0.z - 5 * p1.z + 4 * p2.z - p3.z) * t2 +
-                  (-p0.z + 3 * p1.z - 3 * p2.z + p3.z) * t3);
-    return r;
+    const float alpha = 0.5f;   // centripetal
+    float t0 = 0.0f;
+    float t1 = t0 + powf(fmaxf(Vector3Distance(p0, p1), 1e-5f), alpha);
+    float t2 = t1 + powf(fmaxf(Vector3Distance(p1, p2), 1e-5f), alpha);
+    float t3 = t2 + powf(fmaxf(Vector3Distance(p2, p3), 1e-5f), alpha);
+
+    float tt = t1 + (t2 - t1) * t;   // t arrives normalised across the middle span
+
+    Vector3 a1 = Vector3Lerp(p0, p1, (tt - t0) / (t1 - t0));
+    Vector3 a2 = Vector3Lerp(p1, p2, (tt - t1) / (t2 - t1));
+    Vector3 a3 = Vector3Lerp(p2, p3, (tt - t2) / (t3 - t2));
+    Vector3 b1 = Vector3Lerp(a1, a2, (tt - t0) / (t2 - t0));
+    Vector3 b2 = Vector3Lerp(a2, a3, (tt - t1) / (t3 - t1));
+    return Vector3Lerp(b1, b2, (tt - t1) / (t2 - t1));
 }
 
 static float LerpF(float a, float b, float t) { return a + (b - a) * t; }
@@ -80,12 +89,15 @@ bool SplineBuild(Spline *spline, const Level *level, float spacing)
     }
     MemFree(subdiv);
 
-    // Pass 3: arc lengths and tangents, both computed on the closed loop.
+    // Pass 3: arc lengths, tangents and grades, all on the closed loop.
+    // Distances are measured on the ground plane so that lap progress, AI
+    // look-ahead and gate spacing do not stretch on a climb.
     float acc = 0.0f;
     for (int i = 0; i < total; i++) {
         spline->samples[i].distance = acc;
-        acc += Vector3Distance(spline->samples[i].position,
-                               spline->samples[(i + 1) % total].position);
+        Vector3 a = spline->samples[i].position;
+        Vector3 b = spline->samples[(i + 1) % total].position;
+        acc += sqrtf((b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z));
     }
     spline->length = acc;
 
@@ -93,10 +105,13 @@ bool SplineBuild(Spline *spline, const Level *level, float spacing)
         Vector3 prev = spline->samples[(i - 1 + total) % total].position;
         Vector3 next = spline->samples[(i + 1) % total].position;
         Vector3 dir = Vector3Subtract(next, prev);
+
+        float rise = dir.y;
         dir.y = 0.0f;
-        float len = Vector3Length(dir);
-        spline->samples[i].tangent = (len > 1e-6f) ? Vector3Scale(dir, 1.0f / len)
+        float run = Vector3Length(dir);
+        spline->samples[i].tangent = (run > 1e-6f) ? Vector3Scale(dir, 1.0f / run)
                                                    : (Vector3){ 0, 0, 1 };
+        spline->samples[i].grade = (run > 1e-6f) ? rise / run : 0.0f;
     }
 
     TraceLog(LOG_INFO, "SPLINE: %d samples, loop length %.2f units", total, spline->length);
@@ -185,11 +200,13 @@ SplineQuery SplineClosest(const Spline *spline, Vector3 point, int *hintIndex)
     Vector3 b = spline->samples[next].position;
 
     q.index = best;
-    q.position = Vector3Lerp(a, b, bestT);
+    q.position = Vector3Lerp(a, b, bestT);      // carries the surface height
     q.tangent = spline->samples[best].tangent;
     q.halfWidth = LerpF(spline->samples[best].width, spline->samples[next].width, bestT) * 0.5f;
+    q.grade = LerpF(spline->samples[best].grade, spline->samples[next].grade, bestT);
 
-    float segLen = Vector3Distance(a, b);
+    // Horizontal, to match how sample distances were accumulated.
+    float segLen = sqrtf((b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z));
     q.distance = spline->samples[best].distance + segLen * bestT;
     if (q.distance >= spline->length) q.distance -= spline->length;
 
@@ -223,6 +240,7 @@ SplineSample SplineSampleAt(const Spline *spline, float distance)
         out.position = Vector3Lerp(spline->samples[i].position, spline->samples[j].position, t);
         out.tangent = spline->samples[i].tangent;
         out.width = LerpF(spline->samples[i].width, spline->samples[j].width, t);
+        out.grade = LerpF(spline->samples[i].grade, spline->samples[j].grade, t);
         out.distance = distance;
         return out;
     }

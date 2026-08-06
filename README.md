@@ -94,9 +94,10 @@ engine/          reusable, game-agnostic
   arena.*        bump allocator: a level is one allocation, freed in one call
   json.*         dependency-free JSON reader used by the level loader
   level.*        level file -> props, colliders, spawns, waypoints, checkpoints
-  spline.*       closed centre line: arc-length queries, nearest point, width
+  spline.*       closed centre line: arc length, nearest point, width, gradient
   collide.*      oriented boxes on XZ, SAT, uniform-grid broadphase
   light.*        point and spot lights, per-draw relevance selection
+  terrain.*      heightfield ground fitted to the racing line
   render.*       static batching, frustum culling, lighting shader, chase camera
   assets.*       name-keyed model/texture/sound cache
   audio.*        procedurally synthesised engine note, tyre scrub, beeps
@@ -120,8 +121,8 @@ levels/          circuit01.level.json (loaded) + circuit01.blend (editable)
 
 **Static batching.** The kit is untextured flat-shaded geometry, so at load time
 every prop is baked into vertex-coloured meshes grouped into spatial chunks. The
-demo track's 221 props collapse to 44 chunk meshes, of which roughly ten pass the
-frustum test each frame. This matters a lot on a Pi.
+demo track's 263 props collapse into a few dozen chunk meshes, of which only the
+ones in view pass the frustum test each frame. This matters a lot on a Pi.
 
 **Progress by arc length.** Lap counting uses distance along the centre line, not
 geometric gate crossings, so clipping the edge of a checkpoint or being shoved
@@ -131,6 +132,22 @@ cutting the course does not advance you.
 **Drivability from the racing line.** There are no invisible track walls. The
 centre line carries a width; inside it you are on tarmac, outside it grip and top
 speed drop. Solid objects (barriers, trees, grandstands) are real colliders.
+
+**Elevation.** The centre line carries height and gradient. Driving stays a 2D
+problem on the XZ plane — collision, steering and lap progress all ignore Y —
+but the surface height and slope ride along with every query, so cars sit on the
+road, pitch to it, and gain or lose speed on gradients. Arc lengths are measured
+on the ground, so a climb does not stretch lap progress or gate spacing.
+
+Gravity along the road is set to about 1.5x the engine's own acceleration. True
+gravity at this scale would be nearer 2.4x, which turned the demo circuit's 18%
+climbs into a crawl.
+
+**Terrain.** A flat ground plane stops working as soon as a track has hills, so
+the ground is a heightfield fitted to the racing line by inverse-distance
+weighting — hugging the road, relaxing to the average height in the open, with
+normals computed from the field so slopes shade. It is chunked like the static
+batch, for culling and so each piece is lit by its own neighbourhood.
 
 **Fixed timestep.** Physics runs at 120 Hz regardless of frame rate.
 
@@ -185,6 +202,17 @@ The fastest way in is to open `levels/circuit01.blend` and edit the demo circuit
 Blender measures light power in watts and the engine wants a small unitless
 brightness, so the exporter divides Power by 100. A `kr_intensity` custom
 property overrides that outright, and `kr_range` overrides the reach.
+
+### Elevation
+
+A straight in `build_demo_track.py` carries a rise, which pitches its tiles about
+their own lateral axis and lifts the centre line. Tiles are stretched by
+`1/cos(pitch)` so a sloped one still spans a whole grid cell. Corners stay level:
+a quarter arc cannot be pitched about a single axis without twisting it, so
+gradients live on the straights and the track crests before turning in.
+
+Authoring by hand in Blender, you simply move pieces in Z and let the racing-line
+curve follow them — the exporter carries height through on everything.
 
 Rebuild the demo track from scratch with:
 
@@ -243,7 +271,9 @@ at placement time instead (see `place_centred`).
       "cone": [23.65, 43.0] }      // inner and outer half-angles, degrees
   ],
   "spawns":      [ { "pos": [0.15, 0, 6], "yaw": 0 } ],
-  "waypoints":   [ { "pos": [0.15, 0, 0], "width": 0.69 } ],   // ordered, closed
+  "waypoints":   [ { "pos": [0.15, -1.5, 0], "width": 0.69 } ], // ordered, closed; Y is the
+                                                                // surface height and drives
+                                                                // gradients and the terrain
   "checkpoints": [ { "pos": [0.15, 0, 8], "yaw": 0, "width": 1.1 } ]
 }
 ```
@@ -272,6 +302,20 @@ Tuning lives in `CarDefaultTuning()` in `game/src/car.c`; `make test` reports la
 times, so it doubles as a tuning loop.
 
 ---
+
+## The demo circuit
+
+`levels/circuit01` is Spa-inspired rather than a replica — the kit only has
+90-degree corners, so what carries over is the rhythm: a hairpin off the start
+line, a plunge into a compression, a long climb out of it, a fast straight along
+the top, two chicanes, and big-radius sweepers on the way back down. It runs
+about 95 units with 2.25 units of elevation between its lowest and highest
+points, and the AI laps it in roughly 23 seconds.
+
+The layout is a list of moves in `TRACK`; the script solves two straight lengths
+so the loop closes in plan, spreads any leftover gradient so it closes in
+elevation, and then asserts that every centre-line point lands on a placed road
+tile.
 
 ## Credits
 

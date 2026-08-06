@@ -54,9 +54,11 @@ static void PlaceOnGrid(Race *race, int index)
     const Level *level = race->level;
 
     Vector2 position = { 0.0f, 0.0f };
+    Vector3 spawn3D = { 0.0f, 0.0f, 0.0f };
     float yaw = 0.0f;
     if (level->spawnCount > 0) {
         const LevelSpawn *spawn = &level->spawns[index % level->spawnCount];
+        spawn3D = spawn->position;
         position = (Vector2){ spawn->position.x, spawn->position.z };
         yaw = spawn->yawDeg * DEG2RAD;
     }
@@ -68,8 +70,10 @@ static void PlaceOnGrid(Race *race, int index)
     p->splineHint = -1;
     p->bestLapTime = 0.0f;
 
-    Vector3 here = { position.x, 0.0f, position.y };
+    Vector3 here = { position.x, spawn3D.y, position.y };
     SplineQuery q = SplineClosest(race->spline, here, &p->splineHint);
+    racer->car.height = q.position.y;
+    racer->car.pitch = atanf(q.grade);
     p->splineDistance = q.distance;
     p->lastSplineDistance = q.distance;
     p->score = LapRelative(race, q.distance) - race->spline->length;   // still behind the line
@@ -150,10 +154,12 @@ void RaceReset(Race *race)
 void RaceRespawn(Race *race, int index)
 {
     Racer *racer = &race->racers[index];
-    Vector3 here = { racer->car.position.x, 0.0f, racer->car.position.y };
+    Vector3 here = { racer->car.position.x, racer->car.height, racer->car.position.y };
     SplineQuery q = SplineClosest(race->spline, here, &racer->progress.splineHint);
 
     racer->car.position = (Vector2){ q.position.x, q.position.z };
+    racer->car.height = q.position.y;
+    racer->car.pitch = atanf(q.grade);
     racer->car.velocity = (Vector2){ 0.0f, 0.0f };
     racer->car.yaw = atan2f(q.tangent.x, q.tangent.z);
     racer->car.steerAngle = 0.0f;
@@ -314,15 +320,23 @@ void RaceUpdate(Race *race, CarInput playerInput, float dt)
         }
 
         // --- surface --------------------------------------------------------
-        Vector3 here = { racer->car.position.x, 0.0f, racer->car.position.y };
+        Vector3 here = { racer->car.position.x, racer->car.height, racer->car.position.y };
         SplineQuery q = SplineClosest(race->spline, here, &p->splineHint);
         bool onTrack = fabsf(q.lateral) <= q.halfWidth;
         racer->car.onTrack = onTrack;
 
-        float grip = onTrack ? race->tuning.gripTarmac : race->tuning.gripGrass;
-        float speedScale = onTrack ? 1.0f : race->tuning.offTrackSpeedScale;
+        // The grade is signed along the centre line, so a car facing back down
+        // the track has to see it reversed or a climb would push it along.
+        Vector2 forward = CarForward(&racer->car);
+        float alignment = forward.x * q.tangent.x + forward.y * q.tangent.z;
+        CarSurface surface = {
+            .grip = onTrack ? race->tuning.gripTarmac : race->tuning.gripGrass,
+            .speedScale = onTrack ? 1.0f : race->tuning.offTrackSpeedScale,
+            .grade = (alignment < 0.0f) ? -q.grade : q.grade,
+            .height = q.position.y,
+        };
 
-        CarUpdate(&racer->car, &race->tuning, racer->input, grip, speedScale, dt);
+        CarUpdate(&racer->car, &race->tuning, racer->input, &surface, dt);
 
         // --- static collision -------------------------------------------------
         Obb2 box = CarBox(&racer->car, &race->tuning);
@@ -336,7 +350,7 @@ void RaceUpdate(Race *race, CarInput playerInput, float dt)
         (void)push;
 
         // --- progress ---------------------------------------------------------
-        here = (Vector3){ racer->car.position.x, 0.0f, racer->car.position.y };
+        here = (Vector3){ racer->car.position.x, racer->car.height, racer->car.position.y };
         q = SplineClosest(race->spline, here, &p->splineHint);
         p->lastSplineDistance = p->splineDistance;
         p->splineDistance = q.distance;

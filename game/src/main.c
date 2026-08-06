@@ -30,6 +30,7 @@
 #include "engine/light.h"
 #include "engine/render.h"
 #include "engine/spline.h"
+#include "engine/terrain.h"
 
 #include "game/car.h"
 #include "game/hud.h"
@@ -139,10 +140,19 @@ static void DrawRacer(const Racer *racer, float scale)
     float offsetZ = (-s * cx + c * cz) * scale;
 
     Vector3 position = { racer->car.position.x - offsetX,
-                         lift * scale,
+                         racer->car.height + lift * scale,
                          racer->car.position.y - offsetZ };
-    RenderModelEuler(model, position, (Vector3){ 0.0f, racer->car.yaw * RAD2DEG, 0.0f },
-                     (Vector3){ scale, scale, scale }, racer->tint);
+
+    // Pitch about the car's own lateral axis, so apply it before the yaw. An
+    // XYZ euler triple cannot express that ordering, hence the explicit matrix.
+    // car.pitch is the slope the car sits on, positive uphill. A positive
+    // rotation about +X drops the nose, so it is negated here.
+    Matrix transform = MatrixMultiply(
+        MatrixMultiply(MatrixScale(scale, scale, scale),
+                       MatrixMultiply(MatrixRotateX(-racer->car.pitch),
+                                      MatrixRotateY(racer->car.yaw))),
+        MatrixTranslate(position.x, position.y, position.z));
+    RenderModelTransform(model, transform, racer->tint);
 }
 
 static void DrawShadow(const Racer *racer, const CarTuning *tuning)
@@ -154,13 +164,22 @@ static void DrawShadow(const Racer *racer, const CarTuning *tuning)
     box.halfExtents.y *= 1.05f;
     Obb2Corners(box, corners);
 
+    // Lift each corner along the slope so the patch lies on the road rather
+    // than cutting into a hill.
+    Vector2 forward = CarForward(&racer->car);
+    float slope = tanf(racer->car.pitch);
+    Vector3 lifted[4];
+    for (int i = 0; i < 4; i++) {
+        float along = (corners[i].x - racer->car.position.x) * forward.x +
+                      (corners[i].y - racer->car.position.y) * forward.y;
+        lifted[i] = (Vector3){ corners[i].x,
+                               racer->car.height + along * slope + 0.012f,
+                               corners[i].y };
+    }
+
     Color shade = { 20, 30, 24, 90 };
-    DrawTriangle3D((Vector3){ corners[0].x, 0.012f, corners[0].y },
-                   (Vector3){ corners[1].x, 0.012f, corners[1].y },
-                   (Vector3){ corners[2].x, 0.012f, corners[2].y }, shade);
-    DrawTriangle3D((Vector3){ corners[0].x, 0.012f, corners[0].y },
-                   (Vector3){ corners[2].x, 0.012f, corners[2].y },
-                   (Vector3){ corners[3].x, 0.012f, corners[3].y }, shade);
+    DrawTriangle3D(lifted[0], lifted[1], lifted[2], shade);
+    DrawTriangle3D(lifted[0], lifted[2], lifted[3], shade);
 }
 
 // --- lighting ---------------------------------------------------------------
@@ -227,7 +246,7 @@ static void UpdateHeadlights(LightSet *lights, const Headlights *slots, const Ra
         Vector2 forward = CarForward(car);
         Vector2 right = CarRight(car);
         // Aim slightly down so the beam lands on the road ahead.
-        Vector3 direction = { forward.x, -0.22f, forward.y };
+        Vector3 direction = { forward.x, -0.22f + sinf(car->pitch), forward.y };
 
         for (int side = 0; side < 2; side++) {
             int index = side ? slots[i].right : slots[i].left;
@@ -237,26 +256,13 @@ static void UpdateHeadlights(LightSet *lights, const Headlights *slots, const Ra
             float lateral = side ? HEADLIGHT_SIDE : -HEADLIGHT_SIDE;
             light->position = (Vector3){
                 car->position.x + forward.x * HEADLIGHT_FORWARD + right.x * lateral,
-                HEADLIGHT_HEIGHT,
+                car->height + HEADLIGHT_HEIGHT,
                 car->position.y + forward.y * HEADLIGHT_FORWARD + right.y * lateral,
             };
             light->direction = Vector3Normalize(direction);
             light->enabled = enabled;
         }
     }
-}
-
-static Vector3 LevelCentroid(const Spline *spline)
-{
-    Vector3 sum = { 0 };
-    if (spline->count == 0) return sum;
-    for (int i = 0; i < spline->count; i++) {
-        sum.x += spline->samples[i].position.x;
-        sum.z += spline->samples[i].position.z;
-    }
-    sum.x /= (float)spline->count;
-    sum.z /= (float)spline->count;
-    return sum;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +314,12 @@ int main(int argc, char **argv)
         TraceLog(LOG_ERROR, "MAIN: static batch build failed");
     }
 
+    Terrain terrain;
+    TerrainSettings terrainSettings = TerrainDefaultSettings(level.groundColor);
+    if (!TerrainBuild(&terrain, &spline, &terrainSettings)) {
+        TraceLog(LOG_ERROR, "MAIN: terrain build failed");
+    }
+
     Race race;
     if (!RaceInit(&race, &level, &spline, &collision, options.racers)) {
         TraceLog(LOG_ERROR, "MAIN: race init failed");
@@ -337,10 +349,11 @@ int main(int argc, char **argv)
 
     const Racer *player = &race.racers[race.playerIndex];
     ChaseCamera camera;
-    ChaseCameraInit(&camera, (Vector3){ player->car.position.x, 0.0f, player->car.position.y },
+    ChaseCameraInit(&camera,
+                    (Vector3){ player->car.position.x, player->car.height,
+                               player->car.position.y },
                     player->car.yaw);
 
-    Vector3 groundCentre = LevelCentroid(&spline);
     FixedStepper stepper;
     FixedStepperInit(&stepper, PHYSICS_HZ, 8);
 
@@ -389,7 +402,8 @@ int main(int argc, char **argv)
         player = &race.racers[race.playerIndex];
         float speed01 = Clamp(player->car.speed / race.tuning.topSpeed, 0.0f, 1.0f);
         ChaseCameraUpdate(&camera,
-                          (Vector3){ player->car.position.x, 0.0f, player->car.position.y },
+                          (Vector3){ player->car.position.x, player->car.height,
+                                     player->car.position.y },
                           player->car.yaw, speed01, dt);
 
         // Engine note tracks revs; tyre scrub follows slip while on the ground.
@@ -402,8 +416,7 @@ int main(int argc, char **argv)
 
         BeginDrawing();
         RenderBeginScene(camera.camera, level.skyColor);
-            RenderGroundPlane((Vector3){ groundCentre.x, -0.02f, groundCentre.z }, 260.0f,
-                              level.groundColor);
+            TerrainDraw(&terrain, camera.camera);
             StaticBatchDraw(&batch, camera.camera);
             for (int i = 0; i < race.racerCount; i++) DrawShadow(&race.racers[i], &race.tuning);
             for (int i = 0; i < race.racerCount; i++) DrawRacer(&race.racers[i], CAR_SCALE);
@@ -452,6 +465,7 @@ int main(int argc, char **argv)
     }
 
     RaceFree(&race);
+    TerrainFree(&terrain);
     StaticBatchFree(&batch);
     CollisionWorldFree(&collision);
     SplineFree(&spline);

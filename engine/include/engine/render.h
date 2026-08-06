@@ -36,6 +36,24 @@ RenderSettings RenderDefaultSettings(const Level *level);
 // telling the renderer again. Pass NULL to light with the sun alone.
 void RenderSetLights(const LightSet *lights);
 
+// --- culling and lit draws --------------------------------------------------
+
+typedef struct Frustum {
+    Vector4 planes[6];      // left, right, bottom, top, near, far
+} Frustum;
+
+Frustum RenderFrustumFromCamera(Camera3D camera);
+bool RenderFrustumTestBox(const Frustum *frustum, BoundingBox box);
+
+// Uploads the lights that reach `bounds`, then draws. Anything built out of
+// chunks (the static batch, the terrain) goes through here so each chunk is lit
+// by its own neighbourhood rather than by the scene's brightest lights.
+void RenderDrawLitMesh(Mesh mesh, Material material, Matrix transform, BoundingBox bounds);
+
+// A material set up to render with the scene shader. Meshes built by other
+// modules use this so they pick up lighting and fog.
+Material RenderSceneMaterial(void);
+
 // --- static geometry -------------------------------------------------------
 
 typedef struct BatchChunk {
@@ -82,6 +100,11 @@ void RenderEndScene(void);
 // Draws a model with an XYZ euler rotation in degrees.
 void RenderModelEuler(Model *model, Vector3 position, Vector3 rotationDeg, Vector3 scale,
                       Color tint);
+
+// Draws a model under an arbitrary transform. Needed when a rotation cannot be
+// written as an XYZ euler triple in the order the level format uses — a car
+// pitched about its own lateral axis after yawing, for instance.
+void RenderModelTransform(Model *model, Matrix transform, Color tint);
 
 // A large flat quad under the track so gaps between tiles are not the void.
 void RenderGroundPlane(Vector3 center, float size, Color color);

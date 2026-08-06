@@ -10,3 +10,7 @@ vendor/
 # Screenshots dropped by F2 or --shots
 shot-*.png
 *.png.tmp
+
+# Python bytecode from the Blender tools
+__pycache__/
+*.pyc

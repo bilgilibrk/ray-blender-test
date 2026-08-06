@@ -31,6 +31,11 @@ typedef struct CarTuning {
     float gripGrass;
     float handbrakeGrip;        // multiplier applied to grip when handbraking
 
+    // Pull of a gradient along the road, in world units per second squared.
+    // Exaggerated relative to true gravity at this scale so that hills are
+    // something you feel rather than something you measure.
+    float gravity;
+
     float halfWidth;            // collision box, world units
     float halfLength;
     float offTrackSpeedScale;   // top-speed multiplier off the tarmac
@@ -45,11 +50,24 @@ typedef struct CarInput {
     bool handbrake;
 } CarInput;
 
+// What the car is standing on this tick. Driving stays a 2D problem on the XZ
+// plane; height and grade ride along so gradients affect speed and the car can
+// be drawn sitting on the road.
+typedef struct CarSurface {
+    float grip;                 // lateral velocity decay rate, 1/s
+    float speedScale;           // multiplier on top speed
+    float grade;                // rise over run along the direction of travel
+    float height;               // surface height under the car
+} CarSurface;
+
 typedef struct Car {
     Vector2 position;           // world (x, z)
     Vector2 velocity;           // world (x, z)
     float yaw;                  // radians; 0 faces +Z
     float steerAngle;
+
+    float height;               // follows the track surface
+    float pitch;                // radians, nose-up positive; visual only
 
     // Derived each tick, useful for audio, effects and the HUD.
     float speed;
@@ -57,15 +75,15 @@ typedef struct Car {
     float lateralSpeed;
     float slip;                 // 0..1, how much the tyres are sliding
     float yawRate;
+    float slopeAccel;           // gravity's contribution this tick, for the HUD
     bool onTrack;
 } Car;
 
 void CarInit(Car *car, Vector2 position, float yaw);
 
-// Advances one fixed step. `grip` and `speedScale` come from the surface the
-// car is standing on, so callers blend tarmac and grass however they like.
+// Advances one fixed step against the surface the car is standing on.
 void CarUpdate(Car *car, const CarTuning *tuning, CarInput input,
-               float grip, float speedScale, float dt);
+               const CarSurface *surface, float dt);
 
 // Collision box in world space.
 Obb2 CarBox(const Car *car, const CarTuning *tuning);

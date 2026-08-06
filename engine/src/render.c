@@ -443,8 +443,6 @@ void StaticBatchFree(StaticBatch *batch)
 
 // --- frustum culling --------------------------------------------------------
 
-typedef struct Frustum { Vector4 planes[6]; } Frustum;
-
 // Gribb-Hartmann plane extraction from a view-projection matrix.
 static Frustum FrustumFromMatrix(Matrix m)
 {
@@ -465,7 +463,7 @@ static Frustum FrustumFromMatrix(Matrix m)
     return f;
 }
 
-static bool FrustumTestBox(const Frustum *f, BoundingBox box)
+bool RenderFrustumTestBox(const Frustum *f, BoundingBox box)
 {
     for (int i = 0; i < 6; i++) {
         Vector4 p = f->planes[i];
@@ -478,30 +476,41 @@ static bool FrustumTestBox(const Frustum *f, BoundingBox box)
     return true;
 }
 
-void StaticBatchDraw(StaticBatch *batch, Camera3D camera)
+Frustum RenderFrustumFromCamera(Camera3D camera)
 {
-    batch->drawnLastFrame = 0;
-    if (!batch->ready || batch->chunkCount == 0) return;
-
     float aspect = (float)GetScreenWidth() / (float)GetScreenHeight();
     Matrix view = GetCameraMatrix(camera);
     Matrix proj = (camera.projection == CAMERA_ORTHOGRAPHIC)
         ? MatrixOrtho(-camera.fovy / 2 * aspect, camera.fovy / 2 * aspect,
                       -camera.fovy / 2, camera.fovy / 2, 0.01f, 1000.0f)
         : MatrixPerspective(camera.fovy * DEG2RAD, aspect, 0.01f, 1000.0f);
-    Frustum frustum = FrustumFromMatrix(MatrixMultiply(view, proj));
+    return FrustumFromMatrix(MatrixMultiply(view, proj));
+}
 
+void RenderDrawLitMesh(Mesh mesh, Material material, Matrix transform, BoundingBox bounds)
+{
+    Vector3 center = { (bounds.min.x + bounds.max.x) * 0.5f,
+                       (bounds.min.y + bounds.max.y) * 0.5f,
+                       (bounds.min.z + bounds.max.z) * 0.5f };
+    UploadLightsFor(center, Vector3Distance(center, bounds.max));
+    DrawMesh(mesh, material, transform);
+}
+
+Material RenderSceneMaterial(void)
+{
+    return g_render.sceneMaterial;
+}
+
+void StaticBatchDraw(StaticBatch *batch, Camera3D camera)
+{
+    batch->drawnLastFrame = 0;
+    if (!batch->ready || batch->chunkCount == 0) return;
+
+    Frustum frustum = RenderFrustumFromCamera(camera);
     for (int i = 0; i < batch->chunkCount; i++) {
-        BoundingBox bounds = batch->chunks[i].bounds;
-        if (!FrustumTestBox(&frustum, bounds)) continue;
-
-        Vector3 center = { (bounds.min.x + bounds.max.x) * 0.5f,
-                           (bounds.min.y + bounds.max.y) * 0.5f,
-                           (bounds.min.z + bounds.max.z) * 0.5f };
-        float radius = Vector3Distance(center, bounds.max);
-        UploadLightsFor(center, radius);
-
-        DrawMesh(batch->chunks[i].mesh, batch->material, MatrixIdentity());
+        if (!RenderFrustumTestBox(&frustum, batch->chunks[i].bounds)) continue;
+        RenderDrawLitMesh(batch->chunks[i].mesh, batch->material, MatrixIdentity(),
+                          batch->chunks[i].bounds);
         batch->drawnLastFrame++;
     }
 }
@@ -596,17 +605,23 @@ void RenderEndScene(void)
 void RenderModelEuler(Model *model, Vector3 position, Vector3 rotationDeg, Vector3 scale,
                       Color tint)
 {
-    if (!model || model->meshCount == 0) return;
-
     Matrix m = MatrixMultiply(
         MatrixMultiply(MatrixScale(scale.x, scale.y, scale.z),
                        MatrixRotateXYZ((Vector3){ rotationDeg.x * DEG2RAD,
                                                   rotationDeg.y * DEG2RAD,
                                                   rotationDeg.z * DEG2RAD })),
         MatrixTranslate(position.x, position.y, position.z));
+    RenderModelTransform(model, m, tint);
+}
+
+void RenderModelTransform(Model *model, Matrix m, Color tint)
+{
+    if (!model || model->meshCount == 0) return;
 
     // Approximate extent, used only to decide which lights are worth uploading.
-    float reach = 1.2f * fmaxf(fabsf(scale.x), fmaxf(fabsf(scale.y), fabsf(scale.z)));
+    Vector3 position = { m.m12, m.m13, m.m14 };
+    float reach = 1.2f * fmaxf(fabsf(m.m0) + fabsf(m.m4) + fabsf(m.m8),
+                               fabsf(m.m2) + fabsf(m.m6) + fabsf(m.m10));
     UploadLightsFor(position, reach);
 
     for (int i = 0; i < model->meshCount; i++) {
@@ -642,11 +657,14 @@ void RenderGroundPlane(Vector3 center, float size, Color color)
 
     Matrix transform = MatrixMultiply(MatrixScale(size, 1.0f, size),
                                       MatrixTranslate(center.x, center.y, center.z));
-    UploadLightsFor(center, size * 0.5f);
+    BoundingBox bounds = {
+        { center.x - size * 0.5f, center.y, center.z - size * 0.5f },
+        { center.x + size * 0.5f, center.y, center.z + size * 0.5f },
+    };
 
     Material material = g_render.sceneMaterial;
     material.maps[MATERIAL_MAP_DIFFUSE].color = color;
-    DrawMesh(g_render.groundMesh, material, transform);
+    RenderDrawLitMesh(g_render.groundMesh, material, transform, bounds);
 }
 
 // ---------------------------------------------------------------------------

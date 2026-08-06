@@ -27,6 +27,11 @@ CarTuning CarDefaultTuning(void)
         .gripGrass = 3.0f,
         .handbrakeGrip = 0.22f,
 
+        // About 1.5x the engine's own acceleration. True gravity at this scale
+        // would be nearer 2.4x, which made the 18% climbs on the demo circuit a
+        // crawl; this keeps hills clearly felt but still driveable.
+        .gravity = 11.0f,
+
         .halfWidth = 0.148f,
         .halfLength = 0.298f,
         .offTrackSpeedScale = 0.58f,
@@ -64,7 +69,7 @@ Obb2 CarBox(const Car *car, const CarTuning *tuning)
 }
 
 void CarUpdate(Car *car, const CarTuning *tuning, CarInput input,
-               float grip, float speedScale, float dt)
+               const CarSurface *surface, float dt)
 {
     if (dt <= 0.0f) return;
 
@@ -89,7 +94,7 @@ void CarUpdate(Car *car, const CarTuning *tuning, CarInput input,
 
     // --- longitudinal ------------------------------------------------------
     float accel = 0.0f;
-    float topSpeed = tuning->topSpeed * speedScale;
+    float topSpeed = tuning->topSpeed * surface->speedScale;
 
     if (input.throttle > 0.0f) {
         // Taper power near the limit instead of clamping, which would feel abrupt.
@@ -108,13 +113,25 @@ void CarUpdate(Car *car, const CarTuning *tuning, CarInput input,
     accel -= tuning->dragLinear * vLong;
     accel -= tuning->dragQuadratic * vLong * fabsf(vLong);
 
+    // Gravity along the road. sin(atan(grade)) resolves the slope into the
+    // direction of travel, so a climb costs speed and a descent gives it back.
+    float slope = surface->grade;
+    car->slopeAccel = -tuning->gravity * (slope / sqrtf(1.0f + slope * slope));
+    accel += car->slopeAccel;
+
     vLong += accel * dt;
-    vLong = Clamp(vLong, -tuning->reverseSpeed, topSpeed);
+    // A steep enough descent should be able to push past the flat-road limit,
+    // which is where the speed on a downhill run comes from.
+    float downhillAllowance = (car->slopeAccel > 0.0f) ? 1.35f : 1.0f;
+    vLong = Clamp(vLong, -tuning->reverseSpeed, topSpeed * downhillAllowance);
     // Kill the last sliver of creep so a stopped car actually stops.
-    if (input.throttle <= 0.0f && input.brake <= 0.0f && fabsf(vLong) < 0.02f) vLong = 0.0f;
+    if (input.throttle <= 0.0f && input.brake <= 0.0f &&
+        fabsf(vLong) < 0.02f && fabsf(car->slopeAccel) < 0.05f) {
+        vLong = 0.0f;   // only settle to a stop on the flat
+    }
 
     // --- lateral grip -------------------------------------------------------
-    float lateralGrip = grip;
+    float lateralGrip = surface->grip;
     if (input.handbrake) lateralGrip *= tuning->handbrakeGrip;
     vLat *= expf(-lateralGrip * dt);
 
@@ -138,6 +155,12 @@ void CarUpdate(Car *car, const CarTuning *tuning, CarInput input,
 
     car->position.x += car->velocity.x * dt;
     car->position.y += car->velocity.y * dt;
+
+    // Settle onto the surface and lean into the slope. Both are presentation
+    // only: the simulation itself stays flat.
+    float pitchTarget = atanf(surface->grade);
+    car->pitch += (pitchTarget - car->pitch) * (1.0f - expf(-12.0f * dt));
+    car->height += (surface->height - car->height) * (1.0f - expf(-18.0f * dt));
 
     car->forwardSpeed = vLong;
     car->lateralSpeed = vLat;

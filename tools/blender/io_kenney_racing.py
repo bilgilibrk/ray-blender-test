@@ -525,14 +525,32 @@ def collect_racing_line(obj, spacing):
     if len(points) < 3:
         return []
 
-    # Thin out to the requested spacing, always keeping the loop closed.
-    kept = [points[0]]
-    for p in points[1:]:
-        if (p - kept[-1]).length >= spacing:
-            kept.append(p)
-    if len(kept) > 2 and (kept[-1] - kept[0]).length < spacing * 0.5:
-        kept.pop()
-    return kept
+    # Resample at a constant arc length rather than thinning. Dropping points
+    # leaves spans as uneven as the source curve, and uneven spans are what make
+    # a smoothed centre line wobble.
+    ring = points + [points[0]]
+    total = sum((ring[i + 1] - ring[i]).length for i in range(len(ring) - 1))
+    if total < spacing:
+        return points
+
+    count = max(3, int(round(total / spacing)))
+    step = total / count
+
+    resampled = []
+    seg = 0
+    carried = 0.0
+    for i in range(count):
+        target = i * step
+        while seg < len(ring) - 2:
+            seg_len = (ring[seg + 1] - ring[seg]).length
+            if carried + seg_len >= target or seg_len <= 1e-9:
+                break
+            carried += seg_len
+            seg += 1
+        seg_len = (ring[seg + 1] - ring[seg]).length
+        t = 0.0 if seg_len <= 1e-9 else (target - carried) / seg_len
+        resampled.append(ring[seg].lerp(ring[seg + 1], min(max(t, 0.0), 1.0)))
+    return resampled
 
 
 def object_box(obj):
@@ -592,6 +610,22 @@ def light_to_dict(obj):
     return entry
 
 
+def distance_to_ring(point, ring):
+    """Shortest distance from a point to a closed polyline of (x, z) pairs."""
+    best = 1e30
+    count = len(ring)
+    for i in range(count):
+        ax, az = ring[i]
+        bx, bz = ring[(i + 1) % count]
+        dx, dz = bx - ax, bz - az
+        span = dx * dx + dz * dz
+        t = 0.0 if span < 1e-12 else ((point[0] - ax) * dx + (point[1] - az) * dz) / span
+        t = max(0.0, min(1.0, t))
+        ox, oz = point[0] - (ax + dx * t), point[1] - (az + dz * t)
+        best = min(best, ox * ox + oz * oz)
+    return math.sqrt(best)
+
+
 def build_level_dict(context, report=None):
     scene = context.scene
     settings = scene.kr_level
@@ -599,6 +633,15 @@ def build_level_dict(context, report=None):
     props, colliders, spawns, checkpoints, lights = [], [], [], [], []
     racing_lines = []
     sun = None
+
+    # The racing line is needed before the colliders are filtered, so find it
+    # in a first pass over the scene.
+    waypoint_ring = []
+    for obj in scene.objects:
+        if obj.get(PROP_TYPE) == "racingline":
+            waypoint_ring = [(p.x, -p.y) for p in collect_racing_line(obj,
+                                                                     settings.waypoint_spacing)]
+            break
 
     for obj in scene.objects:
         if not obj.visible_get() and obj.hide_render:
@@ -654,6 +697,24 @@ def build_level_dict(context, report=None):
                     "height": round(half.z * 2.0, 4),
                     "yaw": round(engine_yaw_degrees(obj), 3),
                 })
+
+    # Drop any collider that would sit on the racing surface. Scenery placement
+    # is fiddly on a circuit that runs close to itself, and one box on the line
+    # is enough to wedge the whole field; better to lose the collision than the
+    # race. The count is reported so the mistake is still visible.
+    blocked = 0
+    if waypoint_ring:
+        kept = []
+        for box in colliders:
+            reach = math.hypot(box["half"][0], box["half"][1])
+            if distance_to_ring((box["pos"][0], box["pos"][2]), waypoint_ring) - reach \
+                    < settings.track_width * 0.5 + 0.12:
+                blocked += 1
+                continue
+            kept.append(box)
+        colliders = kept
+    if blocked and report:
+        report({"WARNING"}, f"{blocked} collider(s) dropped for intruding on the track")
 
     spawns.sort(key=lambda o: o.get(PROP_INDEX, 0))
     checkpoints.sort(key=lambda o: o.get(PROP_INDEX, 0))
