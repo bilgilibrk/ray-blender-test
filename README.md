@@ -98,6 +98,7 @@ A gamepad works too: left stick steers, triggers drive and brake.
 --debug             start with the debug overlay
 --frames N          quit after N frames
 --shots a,b,c       screenshot on those frames, with --shot-prefix
+--shot-every N      screenshot every Nth frame, to assemble into a video
 ```
 
 ---

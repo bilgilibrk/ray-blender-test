@@ -13,6 +13,9 @@ vendor/*.zip
 shot-*.png
 *.png.tmp
 
+# Gameplay videos assembled from a --shot-every capture run
+recordings/
+
 # Python bytecode from the Blender tools
 __pycache__/
 *.pyc

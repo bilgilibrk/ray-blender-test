@@ -13,6 +13,7 @@
 //     --night             start at night, with the placed lights and headlights
 //     --frames N          quit after N frames (for automated runs)
 //     --shots a,b,c       screenshot on those frame numbers
+//     --shot-every N      screenshot every Nth frame (a recordable sequence)
 //     --shot-prefix P     screenshot filename prefix (default "shot")
 
 #include <stdio.h>
@@ -88,6 +89,7 @@ typedef struct Options {
     int frameLimit;
     int shots[MAX_SHOTS];
     int shotCount;
+    int shotEvery;
 } Options;
 
 static Options DefaultOptions(void)
@@ -107,6 +109,7 @@ static Options DefaultOptions(void)
         .night = false,
         .frameLimit = 0,
         .shotCount = 0,
+        .shotEvery = 0,
     };
     return o;
 }
@@ -136,6 +139,7 @@ static bool ParseArgs(Options *options, int argc, char **argv)
         else if (!strcmp(a, "--shot-prefix") && hasNext) options->shotPrefix = argv[++i];
         else if (!strcmp(a, "--frames") && hasNext) options->frameLimit = atoi(argv[++i]);
         else if (!strcmp(a, "--shots") && hasNext) ParseShots(options, argv[++i]);
+        else if (!strcmp(a, "--shot-every") && hasNext) options->shotEvery = atoi(argv[++i]);
         else if (!strcmp(a, "--fullscreen")) options->fullscreen = true;
         else if (!strcmp(a, "--no-audio")) options->audio = false;
         else if (!strcmp(a, "--no-vsync")) options->vsync = false;
@@ -621,6 +625,11 @@ int main(int argc, char **argv)
         while (nextShot < options.shotCount && options.shots[nextShot] <= frame) {
             EngineScreenshot(TextFormat("%s-%04d.png", options.shotPrefix, frame));
             nextShot++;
+        }
+        // A whole run dumped as a sequence. --frames pins dt to 1/60, so every
+        // Nth frame replayed at 60/N is real time however slowly this writes.
+        if (options.shotEvery > 0 && frame % options.shotEvery == 0) {
+            EngineScreenshot(TextFormat("%s-%06d.png", options.shotPrefix, frame));
         }
         if (options.frameLimit > 0 && frame >= options.frameLimit) break;
     }
