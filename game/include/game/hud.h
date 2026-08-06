@@ -23,7 +23,14 @@ typedef struct HudStats {
     bool night;
 } HudStats;
 
-void HudDraw(const Race *race, bool paused);
+// What the results screen should offer once the race is over.
+typedef struct HudProgress {
+    bool hasNext;               // another circuit exists after this one
+    bool unlockedNext;          // ...and the player won it, so it is open now
+    const char *nextName;       // that circuit's name, for the prompt
+} HudProgress;
+
+void HudDraw(const Race *race, bool paused, const HudProgress *progress);
 void HudDrawDebug(const Race *race, const HudStats *stats);
 
 #endif // GAME_HUD_H

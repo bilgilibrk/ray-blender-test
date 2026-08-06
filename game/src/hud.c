@@ -145,12 +145,15 @@ static void DrawGradient(const Racer *player, Rectangle area)
     TextAt(buffer, (int)(area.x + 42), (int)(area.y + 9), 22, tone);
 }
 
-static void DrawResults(const Race *race)
+static void DrawResults(const Race *race, const HudProgress *progress)
 {
     int w = GetScreenWidth(), h = GetScreenHeight();
     DrawRectangle(0, 0, w, h, (Color){ 8, 10, 14, 190 });
 
-    int panelW = 460, panelH = 90 + race->racerCount * 30;
+    // A two-line prompt needs its own room, or it crowds the last finisher and
+    // runs off the bottom of the panel.
+    bool twoLine = (progress && progress->nextName != NULL);
+    int panelW = 460, panelH = (twoLine ? 112 : 90) + race->racerCount * 30;
     Rectangle panel = { (w - panelW) / 2.0f, (h - panelH) / 2.0f, (float)panelW, (float)panelH };
     DrawRectangleRounded(panel, 0.06f, 8, (Color){ 20, 26, 34, 240 });
 
@@ -171,12 +174,27 @@ static void DrawResults(const Race *race)
                   (int)(panel.x + panelW - 20), y, 20, kDim);
         y += 30;
     }
-    TextCentre("ENTER to race again", w / 2, (int)(panel.y + panelH - 26), 16, kDim);
+    // Winning is the only way on, so a beaten player is told what they were
+    // racing for rather than just being offered a rerun.
+    if (progress && progress->unlockedNext && progress->nextName) {
+        char prompt[96];
+        snprintf(prompt, sizeof prompt, "ENTER for %s", progress->nextName);
+        TextCentre(prompt, w / 2, (int)(panel.y + panelH - 40), 18, kAccent);
+        TextCentre("R to race this one again", w / 2, (int)(panel.y + panelH - 18), 14, kDim);
+    } else if (progress && progress->hasNext && progress->nextName) {
+        char prompt[96];
+        snprintf(prompt, sizeof prompt, "WIN TO UNLOCK %s", progress->nextName);
+        TextCentre(prompt, w / 2, (int)(panel.y + panelH - 40), 16,
+                   (Color){ 255, 150, 90, 255 });
+        TextCentre("ENTER to race again", w / 2, (int)(panel.y + panelH - 18), 14, kDim);
+    } else {
+        TextCentre("ENTER to race again", w / 2, (int)(panel.y + panelH - 26), 16, kDim);
+    }
 }
 
 // ---------------------------------------------------------------------------
 
-void HudDraw(const Race *race, bool paused)
+void HudDraw(const Race *race, bool paused, const HudProgress *progress)
 {
     int w = GetScreenWidth(), h = GetScreenHeight();
     const Racer *player = &race->racers[race->playerIndex];
@@ -224,7 +242,7 @@ void HudDraw(const Race *race, bool paused)
         TextCentre("FINISHED — waiting for the field", w / 2, h / 2 - 40, 24, kAccent);
     }
 
-    if (race->state == RACE_FINISHED) DrawResults(race);
+    if (race->state == RACE_FINISHED) DrawResults(race, progress);
 
     if (paused) {
         DrawRectangle(0, 0, w, h, (Color){ 8, 10, 14, 160 });

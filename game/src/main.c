@@ -1,7 +1,7 @@
 // Top-down racer built on the engine layer, using the Kenney Racing Kit.
 //
 //   racer [options]
-//     --level PATH        level JSON to load (default levels/circuit01.level.json)
+//     --level PATH        play this one circuit instead of the campaign
 //     --racers N          size of the field, 1..8
 //     --width/--height N  window size
 //     --fullscreen        borderless fullscreen
@@ -60,6 +60,19 @@
 #define HEADLIGHT_SIDE 0.10f
 #define HEADLIGHT_HEIGHT 0.17f
 
+// The circuits in the order the player meets them. Winning a race opens the
+// next; losing offers the same one again. The names are for the results screen
+// and are kept beside the paths so the two cannot drift apart.
+static const char *kCampaign[] = {
+    "levels/circuit01.level.json",
+    "levels/circuit02.level.json",
+};
+static const char *kCampaignNames[] = {
+    "ARDENNES CIRCUIT",
+    "EIFEL NORDSCHLEIFE",
+};
+#define CAMPAIGN_COUNT ((int)(sizeof kCampaign / sizeof kCampaign[0]))
+
 typedef struct Options {
     const char *levelPath;
     const char *shotPrefix;
@@ -80,7 +93,7 @@ typedef struct Options {
 static Options DefaultOptions(void)
 {
     Options o = {
-        .levelPath = "levels/circuit01.level.json",
+        .levelPath = NULL,          // NULL means play the campaign
         .shotPrefix = "shot",
         .racers = 6,
         .width = 1280,
@@ -293,6 +306,112 @@ static void UpdateHeadlights(LightSet *lights, const Headlights *slots, const Ra
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// One circuit's worth of state
+// ---------------------------------------------------------------------------
+
+// Everything tied to a single circuit, grouped rather than left as locals so a
+// level can be torn down and another built in its place while the game runs.
+// What survives a change of circuit - the camera, the skid marks, the fixed
+// stepper, the day/night toggle - deliberately lives outside this.
+typedef struct Stage {
+    Level level;
+    Spline spline;
+    CollisionWorld collision;
+    StaticBatch batch;
+    Terrain terrain;
+    Race race;
+
+    LightSet lights;
+    float baseIntensity[LIGHTS_MAX];
+    int levelLightCount;
+    Headlights headlights[RACE_MAX_RACERS];
+
+    RenderSettings day;
+    RenderSettings dark;
+} Stage;
+
+// Safe on a half-built stage: every one of these tolerates a zeroed struct,
+// which is what lets StageLoad bail out through it at any point.
+static void StageFree(Stage *stage)
+{
+    RaceFree(&stage->race);
+    TerrainFree(&stage->terrain);
+    StaticBatchFree(&stage->batch);
+    CollisionWorldFree(&stage->collision);
+    SplineFree(&stage->spline);
+    LevelUnload(&stage->level);
+    memset(stage, 0, sizeof(*stage));
+}
+
+static bool StageLoad(Stage *stage, const char *path, const Options *options, bool night)
+{
+    memset(stage, 0, sizeof(*stage));
+
+    if (!LevelLoad(&stage->level, path)) return false;
+    if (!SplineBuild(&stage->spline, &stage->level, SPLINE_SPACING)) {
+        StageFree(stage);
+        return false;
+    }
+    if (!CollisionWorldBuild(&stage->collision, stage->level.colliders,
+                             stage->level.colliderCount, 2.0f)) {
+        TraceLog(LOG_ERROR, "MAIN: collision build failed");
+        StageFree(stage);
+        return false;
+    }
+
+    stage->day = RenderDefaultSettings(&stage->level);
+    stage->dark = NightSettings(stage->day);
+    RenderSetSettings(night ? &stage->dark : &stage->day);
+
+    // The track's own elevation range drives the relief tint, and both the
+    // batch and the terrain have to be told before they bake their vertices.
+    float lowest = 1e30f, highest = -1e30f;
+    for (int i = 0; i < stage->spline.count; i++) {
+        float y = stage->spline.samples[i].position.y;
+        if (y < lowest) lowest = y;
+        if (y > highest) highest = y;
+    }
+    RenderSetReliefRange(lowest, highest);
+    TraceLog(LOG_INFO, "MAIN: %s climbs %.2f units (%.2f to %.2f)",
+             stage->level.name, (double)(highest - lowest), (double)lowest, (double)highest);
+
+    if (!StaticBatchBuild(&stage->batch, &stage->level, BATCH_CHUNK_SIZE)) {
+        TraceLog(LOG_ERROR, "MAIN: static batch build failed");
+    }
+
+    TerrainSettings terrainSettings = TerrainDefaultSettings(stage->level.groundColor);
+    if (!TerrainBuild(&stage->terrain, &stage->spline, &terrainSettings)) {
+        TraceLog(LOG_ERROR, "MAIN: terrain build failed");
+    }
+
+    if (!RaceInit(&stage->race, &stage->level, &stage->spline, &stage->collision,
+                  options->racers)) {
+        TraceLog(LOG_ERROR, "MAIN: race init failed");
+        StageFree(stage);
+        return false;
+    }
+    stage->race.autopilot = options->autopilot;
+
+    // Level lights first, then two headlight slots per car appended after them.
+    LightSetClear(&stage->lights);
+    LightSetAddFromLevel(&stage->lights, &stage->level);
+    stage->levelLightCount = stage->lights.count;
+    for (int i = 0; i < stage->levelLightCount; i++) {
+        stage->baseIntensity[i] = stage->lights.lights[i].intensity;
+    }
+    AddHeadlights(&stage->lights, stage->headlights, stage->race.racerCount);
+    ApplyLightMode(&stage->lights, stage->baseIntensity, stage->levelLightCount, night);
+    RenderSetLights(&stage->lights);
+
+    TraceLog(LOG_INFO, "MAIN: %s, %d lights (%d from level, %d headlights)",
+             stage->level.name, stage->lights.count, stage->level.lightCount,
+             stage->race.racerCount * 2);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+
 int main(int argc, char **argv)
 {
     Options options = DefaultOptions();
@@ -308,91 +427,27 @@ int main(int argc, char **argv)
     config.assetRoot = "assets";
     if (!EngineInit(&config)) return 1;
 
-    Level level;
-    if (!LevelLoad(&level, options.levelPath)) {
-        EngineShutdown();
-        return 1;
-    }
+    // --level pins the game to one circuit; otherwise it is the campaign, and
+    // winning opens the next one.
+    const char *single[1] = { options.levelPath };
+    const char **circuits = options.levelPath ? single : kCampaign;
+    int circuitCount = options.levelPath ? 1 : CAMPAIGN_COUNT;
+    int current = 0;
 
-    Spline spline;
-    if (!SplineBuild(&spline, &level, SPLINE_SPACING)) {
-        LevelUnload(&level);
-        EngineShutdown();
-        return 1;
-    }
-
-    CollisionWorld collision;
-    if (!CollisionWorldBuild(&collision, level.colliders, level.colliderCount, 2.0f)) {
-        TraceLog(LOG_ERROR, "MAIN: collision build failed");
-        SplineFree(&spline);
-        LevelUnload(&level);
-        EngineShutdown();
-        return 1;
-    }
-
-    RenderSettings daySettings = RenderDefaultSettings(&level);
-    RenderSettings nightSettings = NightSettings(daySettings);
     bool night = options.night;
-    RenderSetSettings(night ? &nightSettings : &daySettings);
 
-    // The track's own elevation range drives the relief tint, and both the
-    // batch and the terrain have to be told before they bake their vertices.
-    {
-        float lowest = 1e30f, highest = -1e30f;
-        for (int i = 0; i < spline.count; i++) {
-            float y = spline.samples[i].position.y;
-            if (y < lowest) lowest = y;
-            if (y > highest) highest = y;
-        }
-        RenderSetReliefRange(lowest, highest);
-        TraceLog(LOG_INFO, "MAIN: track climbs %.2f units (%.2f to %.2f)",
-                 (double)(highest - lowest), (double)lowest, (double)highest);
-    }
-
-    StaticBatch batch;
-    if (!StaticBatchBuild(&batch, &level, BATCH_CHUNK_SIZE)) {
-        TraceLog(LOG_ERROR, "MAIN: static batch build failed");
-    }
-
-    Terrain terrain;
-    TerrainSettings terrainSettings = TerrainDefaultSettings(level.groundColor);
-    if (!TerrainBuild(&terrain, &spline, &terrainSettings)) {
-        TraceLog(LOG_ERROR, "MAIN: terrain build failed");
-    }
-
-    Race race;
-    if (!RaceInit(&race, &level, &spline, &collision, options.racers)) {
-        TraceLog(LOG_ERROR, "MAIN: race init failed");
-        StaticBatchFree(&batch);
-        CollisionWorldFree(&collision);
-        SplineFree(&spline);
-        LevelUnload(&level);
+    static Stage stage;
+    if (!StageLoad(&stage, circuits[current], &options, night)) {
         EngineShutdown();
         return 1;
     }
-    race.autopilot = options.autopilot;
-
-    // Level lights first, then two headlight slots per car appended after them.
-    static LightSet lights;
-    LightSetClear(&lights);
-    LightSetAddFromLevel(&lights, &level);
-    static float baseIntensity[LIGHTS_MAX];
-    int levelLightCount = lights.count;
-    for (int i = 0; i < levelLightCount; i++) baseIntensity[i] = lights.lights[i].intensity;
-
-    Headlights headlights[RACE_MAX_RACERS] = { 0 };
-    AddHeadlights(&lights, headlights, race.racerCount);
-    ApplyLightMode(&lights, baseIntensity, levelLightCount, night);
-    RenderSetLights(&lights);
 
     if (!options.shadows) RenderSetShadowsEnabled(false);
     else if (!RenderShadowsAvailable()) {
         TraceLog(LOG_WARNING, "MAIN: no shadow map on this GPU, falling back to blob shadows");
     }
-    TraceLog(LOG_INFO, "MAIN: %d lights (%d from level, %d headlights)",
-             lights.count, level.lightCount, race.racerCount * 2);
 
-    const Racer *player = &race.racers[race.playerIndex];
+    const Racer *player = &stage.race.racers[stage.race.playerIndex];
     ChaseCamera camera;
     ChaseCameraInit(&camera,
                     (Vector3){ player->car.position.x, player->car.height,
@@ -418,17 +473,42 @@ int main(int argc, char **argv)
         if (in.pressed[ACTION_TOGGLE_CAMERA]) camera.rotateWithTarget = !camera.rotateWithTarget;
         if (in.pressed[ACTION_TOGGLE_NIGHT]) {
             night = !night;
-            RenderSetSettings(night ? &nightSettings : &daySettings);
-            ApplyLightMode(&lights, baseIntensity, levelLightCount, night);
+            RenderSetSettings(night ? &stage.dark : &stage.day);
+            ApplyLightMode(&stage.lights, stage.baseIntensity, stage.levelLightCount, night);
         }
         if (in.pressed[ACTION_QUIT]) break;
         if (in.pressed[ACTION_PAUSE]) paused = !paused;
+
+        // Winning opens the next circuit; anything less is an invitation to
+        // have another go at this one.
+        bool won = (stage.race.racers[stage.race.playerIndex].progress.finishPosition == 1);
+        bool advance = (stage.race.state == RACE_FINISHED) && won &&
+                       (current + 1 < circuitCount);
+
         if (in.pressed[ACTION_RESET_CAR] && !paused) {
-            if (race.state == RACE_FINISHED) { RaceReset(&race); SkidClear(&skid); }
-            else RaceRespawn(&race, race.playerIndex);
+            if (stage.race.state == RACE_FINISHED) {
+                RaceReset(&stage.race);
+                SkidClear(&skid);
+            } else {
+                RaceRespawn(&stage.race, stage.race.playerIndex);
+            }
         }
-        if (race.state == RACE_FINISHED && in.pressed[ACTION_CONFIRM]) {
-            RaceReset(&race);
+        if (stage.race.state == RACE_FINISHED && in.pressed[ACTION_CONFIRM]) {
+            if (advance) {
+                current++;
+                StageFree(&stage);
+                if (!StageLoad(&stage, circuits[current], &options, night)) {
+                    TraceLog(LOG_ERROR, "MAIN: could not open %s", circuits[current]);
+                    break;
+                }
+                player = &stage.race.racers[stage.race.playerIndex];
+                ChaseCameraInit(&camera,
+                                (Vector3){ player->car.position.x, player->car.height,
+                                           player->car.position.y },
+                                player->car.yaw);
+            } else {
+                RaceReset(&stage.race);
+            }
             SkidClear(&skid);
         }
 
@@ -439,36 +519,20 @@ int main(int argc, char **argv)
             .handbrake = in.handbrake,
         };
 
-
         float dt = GetFrameTime();
         // A headless run has no vsync to pace it, so use the fixed step directly.
         if (options.frameLimit > 0) dt = 1.0f / 60.0f;
 
         if (!paused) {
             int steps = FixedStepperAdvance(&stepper, dt);
-            for (int s = 0; s < steps; s++) RaceUpdate(&race, drive, stepper.step);
+            for (int s = 0; s < steps; s++) RaceUpdate(&stage.race, drive, stepper.step);
+            SkidUpdate(&skid, &stage.race, dt);
         }
 
-        if (!paused) SkidUpdate(&skid, &race, dt);
+        UpdateHeadlights(&stage.lights, stage.headlights, &stage.race, night);
 
-        {
-            static float maxSlip = 0, maxBrake = 0; static int slipTicks=0, brakeTicks=0, ticks=0;
-            for (int i = 0; i < race.racerCount; i++) {
-                const Racer *r = &race.racers[i];
-                if (r->car.slip > maxSlip) maxSlip = r->car.slip;
-                if (r->input.brake > maxBrake) maxBrake = r->input.brake;
-                if (r->car.slip > 0.30f) slipTicks++;
-                if (r->input.brake > 0.55f) brakeTicks++;
-                ticks++;
-            }
-            if (frame % 400 == 0)
-                TraceLog(LOG_WARNING, "SKIDPROBE f%d maxSlip=%.3f maxBrake=%.3f slipTicks=%d brakeTicks=%d of %d",
-                         frame, (double)maxSlip, (double)maxBrake, slipTicks, brakeTicks, ticks);
-        }
-        UpdateHeadlights(&lights, headlights, &race, night);
-
-        player = &race.racers[race.playerIndex];
-        float speed01 = Clamp(player->car.speed / race.tuning.topSpeed, 0.0f, 1.0f);
+        player = &stage.race.racers[stage.race.playerIndex];
+        float speed01 = Clamp(player->car.speed / stage.race.tuning.topSpeed, 0.0f, 1.0f);
         ChaseCameraUpdate(&camera,
                           (Vector3){ player->car.position.x, player->car.height,
                                      player->car.position.y },
@@ -476,8 +540,11 @@ int main(int argc, char **argv)
 
         // Engine note tracks revs; tyre scrub follows slip while on the ground.
         if (AudioEngineAvailable()) {
-            float rpm = Clamp(fabsf(player->car.forwardSpeed) / race.tuning.topSpeed, 0.0f, 1.0f);
-            if (race.state == RACE_COUNTDOWN) rpm = 0.35f + 0.25f * sinf((float)GetTime() * 9.0f);
+            float rpm = Clamp(fabsf(player->car.forwardSpeed) / stage.race.tuning.topSpeed,
+                              0.0f, 1.0f);
+            if (stage.race.state == RACE_COUNTDOWN) {
+                rpm = 0.35f + 0.25f * sinf((float)GetTime() * 9.0f);
+            }
             AudioEngineSetMotor(rpm, player->input.throttle,
                                 player->car.slip * (player->car.onTrack ? 1.0f : 0.6f));
         }
@@ -491,46 +558,59 @@ int main(int argc, char **argv)
         RenderBeginShadowPass((Vector3){ player->car.position.x + lead.x * SHADOW_LEAD,
                                         player->car.height,
                                         player->car.position.y + lead.y * SHADOW_LEAD });
-            TerrainDraw(&terrain, camera.camera);
-            StaticBatchDraw(&batch, camera.camera);
-            for (int i = 0; i < race.racerCount; i++) DrawRacer(&race.racers[i], CAR_SCALE);
+            TerrainDraw(&stage.terrain, camera.camera);
+            StaticBatchDraw(&stage.batch, camera.camera);
+            for (int i = 0; i < stage.race.racerCount; i++) {
+                DrawRacer(&stage.race.racers[i], CAR_SCALE);
+            }
         RenderEndShadowPass();
 
-        RenderBeginScene(camera.camera, level.skyColor);
-            TerrainDraw(&terrain, camera.camera);
-            StaticBatchDraw(&batch, camera.camera);
+        RenderBeginScene(camera.camera, stage.level.skyColor);
+            TerrainDraw(&stage.terrain, camera.camera);
+            StaticBatchDraw(&stage.batch, camera.camera);
             // Rubber lies in the road surface, so it goes down after the road
-            // and before the cars — and never in the depth pass above, where a
+            // and before the cars, and never in the depth pass above, where a
             // flat decal has nothing to cast and only fights the tarmac.
             SkidDraw(&skid);
             // The painted blob stands in only when there is no real shadow to
             // cast one; drawing both would double up under every car.
             if (!RenderShadowsEnabled()) {
-                for (int i = 0; i < race.racerCount; i++) {
-                    DrawShadow(&race.racers[i], &race.tuning);
+                for (int i = 0; i < stage.race.racerCount; i++) {
+                    DrawShadow(&stage.race.racers[i], &stage.race.tuning);
                 }
             }
-            for (int i = 0; i < race.racerCount; i++) DrawRacer(&race.racers[i], CAR_SCALE);
+            for (int i = 0; i < stage.race.racerCount; i++) {
+                DrawRacer(&stage.race.racers[i], CAR_SCALE);
+            }
             if (showDebug) {
-                RenderDebugSpline(&spline, (Color){ 90, 220, 255, 160 });
-                RenderDebugCheckpoints(&level, (Color){ 255, 210, 90, 200 });
-                RenderDebugColliders(&level, (Color){ 255, 80, 120, 90 });
+                RenderDebugSpline(&stage.spline, (Color){ 90, 220, 255, 160 });
+                RenderDebugCheckpoints(&stage.level, (Color){ 255, 210, 90, 200 });
+                RenderDebugColliders(&stage.level, (Color){ 255, 80, 120, 90 });
             }
         RenderEndScene();
 
-        HudDraw(&race, paused);
+        // Recomputed from the current circuit rather than reusing `advance`,
+        // which is stale the moment the player has moved on: `current` has
+        // already stepped and current + 1 may be off the end of the campaign.
+        bool nextExists = (current + 1 < circuitCount);
+        HudProgress progress = {
+            .hasNext = nextExists,
+            .unlockedNext = nextExists && won && stage.race.state == RACE_FINISHED,
+            .nextName = (nextExists && !options.levelPath) ? kCampaignNames[current + 1] : NULL,
+        };
+        HudDraw(&stage.race, paused, &progress);
         if (showDebug) {
             HudStats stats = {
                 .fps = GetFPS(),
-                .drawnChunks = batch.drawnLastFrame,
-                .totalChunks = batch.chunkCount,
-                .triangles = batch.totalTriangles,
+                .drawnChunks = stage.batch.drawnLastFrame,
+                .totalChunks = stage.batch.chunkCount,
+                .triangles = stage.batch.totalTriangles,
                 .audioActive = AudioEngineAvailable(),
-                .lightCount = lights.count,
+                .lightCount = stage.lights.count,
                 .skidMarks = SkidLiveCount(&skid),
                 .night = night,
             };
-            HudDrawDebug(&race, &stats);
+            HudDrawDebug(&stage.race, &stats);
         }
         EndDrawing();
 
@@ -548,20 +628,15 @@ int main(int argc, char **argv)
     // Report something useful when a headless run ends.
     if (options.frameLimit > 0) {
         char buffer[32];
-        const Racer *p = &race.racers[race.playerIndex];
+        const Racer *p = &stage.race.racers[stage.race.playerIndex];
         TraceLog(LOG_INFO, "MAIN: %d frames, elapsed %.1fs, player lap %d, gate %d, "
                            "best %s, pos %d",
-                 frame, race.elapsed, p->progress.lap, p->progress.nextCheckpoint,
+                 frame, stage.race.elapsed, p->progress.lap, p->progress.nextCheckpoint,
                  RaceFormatTime(p->progress.bestLapTime, buffer, sizeof buffer),
-                 RacePositionOf(&race, race.playerIndex));
+                 RacePositionOf(&stage.race, stage.race.playerIndex));
     }
 
-    RaceFree(&race);
-    TerrainFree(&terrain);
-    StaticBatchFree(&batch);
-    CollisionWorldFree(&collision);
-    SplineFree(&spline);
-    LevelUnload(&level);
+    StageFree(&stage);
     EngineShutdown();
     return 0;
 }
