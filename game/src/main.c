@@ -590,6 +590,10 @@ int main(int argc, char **argv)
                 RenderDebugSpline(&stage.spline, (Color){ 90, 220, 255, 160 });
                 RenderDebugCheckpoints(&stage.level, (Color){ 255, 210, 90, 200 });
                 RenderDebugColliders(&stage.level, (Color){ 255, 80, 120, 90 });
+                // Not the gates' yellow: the two overlays sit side by side at
+                // every corner that has a trap, and telling them apart matters
+                // more than the boxes looking like sand.
+                RenderDebugSandtraps(&stage.level, (Color){ 215, 125, 40, 190 });
             }
         RenderEndScene();
 

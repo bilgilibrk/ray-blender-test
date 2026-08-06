@@ -32,6 +32,20 @@ typedef struct LevelCollider {
     float yawDeg;
 } LevelCollider;
 
+// Run-off surface: a box on the XZ plane, yawed about Y, inside which a car is
+// wading through gravel rather than sitting on grass. Nothing solid, so a box
+// that overlaps the tarmac costs nothing — the drivable lane always wins — but
+// the exporter keeps them clear of it anyway.
+//
+// A trap is drawn by the kit's sand pieces and felt through these boxes. The
+// two are authored together and neither is derived from the other, so art and
+// physics can disagree; the level tests are what keep them honest.
+typedef struct LevelSandtrap {
+    Vector3 center;
+    Vector2 halfExtents;    // half width (X) and half depth (Z) before yaw
+    float yawDeg;
+} LevelSandtrap;
+
 typedef struct LevelSpawn {
     Vector3 position;
     float yawDeg;
@@ -75,6 +89,7 @@ typedef struct Level {
 
     LevelProp *props;             int propCount;
     LevelCollider *colliders;     int colliderCount;
+    LevelSandtrap *sandtraps;     int sandtrapCount;
     LevelSpawn *spawns;           int spawnCount;
     LevelWaypoint *waypoints;     int waypointCount;
     LevelCheckpoint *checkpoints; int checkpointCount;
@@ -86,5 +101,10 @@ typedef struct Level {
 // Reads a level JSON file. On failure returns false and logs the reason.
 bool LevelLoad(Level *level, const char *path);
 void LevelUnload(Level *level);
+
+// True when (x, z) is inside any of the level's sand traps. Linear over the
+// list: a circuit carries a few dozen boxes and only cars that are already off
+// the tarmac ever ask.
+bool LevelInSandtrap(const Level *level, float x, float z);
 
 #endif // ENGINE_LEVEL_H

@@ -39,6 +39,7 @@ static size_t EstimateLevelBytes(const JsonValue *root, int autoCheckpoints)
 {
     const JsonValue *props = JsonGet(root, "props");
     const JsonValue *colliders = JsonGet(root, "colliders");
+    const JsonValue *sandtraps = JsonGet(root, "sandtraps");
     const JsonValue *spawns = JsonGet(root, "spawns");
     const JsonValue *waypoints = JsonGet(root, "waypoints");
     const JsonValue *checkpoints = JsonGet(root, "checkpoints");
@@ -46,6 +47,7 @@ static size_t EstimateLevelBytes(const JsonValue *root, int autoCheckpoints)
     size_t bytes = 0;
     bytes += sizeof(LevelProp) * (size_t)JsonCount(props);
     bytes += sizeof(LevelCollider) * (size_t)JsonCount(colliders);
+    bytes += sizeof(LevelSandtrap) * (size_t)JsonCount(sandtraps);
     bytes += sizeof(LevelSpawn) * (size_t)JsonCount(spawns);
     bytes += sizeof(LevelWaypoint) * (size_t)JsonCount(waypoints);
     bytes += sizeof(LevelCheckpoint) * (size_t)(JsonCount(checkpoints) + autoCheckpoints);
@@ -98,6 +100,7 @@ bool LevelLoad(Level *level, const char *path)
     const JsonValue *settings  = JsonGet(root, "settings");
     const JsonValue *jProps    = JsonGet(root, "props");
     const JsonValue *jCollide  = JsonGet(root, "colliders");
+    const JsonValue *jSand     = JsonGet(root, "sandtraps");
     const JsonValue *jSpawns   = JsonGet(root, "spawns");
     const JsonValue *jWaypts   = JsonGet(root, "waypoints");
     const JsonValue *jChecks   = JsonGet(root, "checkpoints");
@@ -161,6 +164,22 @@ bool LevelLoad(Level *level, const char *path)
         c->halfExtents = (Vector2){ fabsf(half[0]), fabsf(half[1]) };
         c->height = (float)JsonNumberField(o, "height", 0.5);
         c->yawDeg = (float)JsonNumberField(o, "yaw", 0.0);
+    }
+
+    // --- sand traps ---------------------------------------------------------
+    level->sandtrapCount = JsonCount(jSand);
+    if (level->sandtrapCount > 0) {
+        level->sandtraps = ArenaAlloc(&level->arena,
+                                      sizeof(LevelSandtrap) * (size_t)level->sandtrapCount);
+    }
+    for (int i = 0; i < level->sandtrapCount; i++) {
+        const JsonValue *o = JsonAt(jSand, i);
+        LevelSandtrap *s = &level->sandtraps[i];
+        s->center = ReadVec3(o, "pos", (Vector3){ 0 });
+        float half[2] = { 0.5f, 0.5f };
+        JsonFloatsField(o, "half", half, 2);
+        s->halfExtents = (Vector2){ fabsf(half[0]), fabsf(half[1]) };
+        s->yawDeg = (float)JsonNumberField(o, "yaw", 0.0);
     }
 
     // --- spawns ------------------------------------------------------------
@@ -240,14 +259,32 @@ bool LevelLoad(Level *level, const char *path)
     }
 
     TraceLog(LOG_INFO,
-             "LEVEL: '%s' loaded — %d props, %d colliders, %d spawns, %d waypoints, "
-             "%d checkpoints, %d lights (%.1f/%.1f KB arena)",
-             level->name, level->propCount, level->colliderCount, level->spawnCount,
-             level->waypointCount, level->checkpointCount, level->lightCount,
-             level->arena.used / 1024.0, level->arena.capacity / 1024.0);
+             "LEVEL: '%s' loaded — %d props, %d colliders, %d sand traps, %d spawns, "
+             "%d waypoints, %d checkpoints, %d lights (%.1f/%.1f KB arena)",
+             level->name, level->propCount, level->colliderCount, level->sandtrapCount,
+             level->spawnCount, level->waypointCount, level->checkpointCount,
+             level->lightCount, level->arena.used / 1024.0, level->arena.capacity / 1024.0);
 
     ArenaFree(&scratch);
     return true;
+}
+
+bool LevelInSandtrap(const Level *level, float x, float z)
+{
+    for (int i = 0; i < level->sandtrapCount; i++) {
+        const LevelSandtrap *s = &level->sandtraps[i];
+        // Into the box's own frame. The axes are the ones Obb2 uses — yaw about
+        // +Y on the engine's left-handed XZ plane — so a trap and a collider
+        // written with the same yaw cover the same ground.
+        float c = cosf(s->yawDeg * DEG2RAD);
+        float sn = sinf(s->yawDeg * DEG2RAD);
+        float dx = x - s->center.x;
+        float dz = z - s->center.z;
+        float localX = dx * c - dz * sn;
+        float localZ = dx * sn + dz * c;
+        if (fabsf(localX) <= s->halfExtents.x && fabsf(localZ) <= s->halfExtents.y) return true;
+    }
+    return false;
 }
 
 void LevelUnload(Level *level)

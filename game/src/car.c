@@ -25,6 +25,10 @@ CarTuning CarDefaultTuning(void)
 
         .gripTarmac = 9.5f,
         .gripGrass = 3.0f,
+        // Gravel holds a sliding car better than wet grass does — it is what
+        // stops a spin rather than letting it run — but nothing about it lets
+        // you steer, because there is barely any speed left to steer with.
+        .gripSand = 6.0f,
         .handbrakeGrip = 0.22f,
 
         // About 1.5x the engine's own acceleration. True gravity at this scale
@@ -35,6 +39,14 @@ CarTuning CarDefaultTuning(void)
         .halfWidth = 0.148f,
         .halfLength = 0.298f,
         .offTrackSpeedScale = 0.58f,
+
+        // A gravel trap is meant to end your lap, not to be a slower line
+        // through the corner. The ceiling takes the speed off as the car
+        // ploughs in; the drag is what keeps it off, settling full throttle at
+        // about 0.95 u/s — a seventh of the pace on tarmac, and slow enough
+        // that the marshals' six-second rescue is the realistic way out.
+        .sandSpeedScale = 0.30f,
+        .sandDrag = 3.5f,
     };
     return t;
 }
@@ -136,7 +148,7 @@ void CarUpdate(Car *car, const CarTuning *tuning, CarInput input,
             accel -= tuning->enginePower * 0.55f * input.brake * headroom;
         }
     }
-    accel -= tuning->dragLinear * vLong;
+    accel -= (tuning->dragLinear + surface->drag) * vLong;
     accel -= tuning->dragQuadratic * vLong * fabsf(vLong);
 
     // Gravity along the road. sin(atan(grade)) resolves the slope into the

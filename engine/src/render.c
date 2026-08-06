@@ -943,6 +943,22 @@ void RenderDebugColliders(const Level *level, Color color)
     }
 }
 
+// Flat on the ground, unlike the collider boxes: a trap has no height, and what
+// the overlay is for is checking that the region a car feels lines up with the
+// sand the artist drew.
+void RenderDebugSandtraps(const Level *level, Color color)
+{
+    for (int i = 0; i < level->sandtrapCount; i++) {
+        const LevelSandtrap *s = &level->sandtraps[i];
+        rlPushMatrix();
+        rlTranslatef(s->center.x, s->center.y + 0.04f, s->center.z);
+        rlRotatef(s->yawDeg, 0.0f, 1.0f, 0.0f);
+        DrawCubeWires((Vector3){ 0, 0, 0 }, s->halfExtents.x * 2.0f, 0.0f,
+                      s->halfExtents.y * 2.0f, color);
+        rlPopMatrix();
+    }
+}
+
 void RenderDebugSpline(const Spline *spline, Color color)
 {
     for (int i = 0; i < spline->count; i++) {

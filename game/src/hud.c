@@ -107,7 +107,12 @@ static void DrawSpeedometer(const Racer *player, const CarTuning *tuning, Rectan
     TextRight(text, (int)(area.x + area.width - 52), (int)(area.y + 8), 40, kInk);
     TextRight("km/h", (int)(area.x + area.width - 14), (int)(area.y + 26), 16, kDim);
 
-    if (!player->car.onTrack) {
+    if (player->car.inSand) {
+        // Worth its own word: the trap is a much bigger problem than the grass,
+        // and the speed bar dropping through the floor deserves an explanation.
+        TextAt("GRAVEL", (int)(area.x + 14), (int)(area.y + 8), 16,
+               (Color){ 255, 205, 120, 255 });
+    } else if (!player->car.onTrack) {
         TextAt("OFF TRACK", (int)(area.x + 14), (int)(area.y + 8), 16,
                (Color){ 255, 150, 90, 255 });
     } else if (player->car.slip > 0.45f) {
@@ -277,8 +282,8 @@ void HudDrawDebug(const Race *race, const HudStats *stats)
     TextAt(buffer, 28, y, 16, kDim); y += 20;
 
     snprintf(buffer, sizeof buffer, "track %s   arc %.2f / %.2f",
-             player->car.onTrack ? "on" : "OFF", player->progress.splineDistance,
-             race->spline->length);
+             player->car.inSand ? "SAND" : (player->car.onTrack ? "on" : "OFF"),
+             player->progress.splineDistance, race->spline->length);
     TextAt(buffer, 28, y, 16, kDim); y += 20;
 
     snprintf(buffer, sizeof buffer, "gate %d/%d   lap %d   score %.1f",

@@ -18,6 +18,11 @@ line. Corners stay level: a quarter arc cannot be pitched about a single axis
 without twisting, so the layout puts its gradients on the straights and crests
 before turning in — which is how real circuits tend to read anyway.
 
+Corners at the end of a long straight get a gravel run-off on the outside, as
+art and as physics: the kit's sand piece and a row of boxes cut from the same
+arc. Everything placed afterwards — grass, barriers, lamp posts — keeps out of
+it, and the barriers move behind it.
+
 Both layouts are inspired rather than replicas: the kit only has 90-degree
 corners, so what carries over is the rhythm. The Ardennes circuit is Spa — a
 hairpin off the start, a plunge into a compression, a long climb, a fast
@@ -44,6 +49,12 @@ LEVELS = os.path.join(REPO, "levels")
 STRAIGHT = "roadStraight"
 START_TILE = "roadStartPositions"
 CORNER_BY_CELLS = {1: "roadCornerSmall", 2: "roadCornerLarge", 3: "roadCornerLarger"}
+
+# The kit ships a sand run-off to match every corner, drawn as a quarter band
+# wrapped around the *outside* of the arc and sharing the corner's own origin —
+# so the same placement that lays the corner lays its gravel.
+SAND_BY_CELLS = {1: "roadCornerSmallSand", 2: "roadCornerLargeSand",
+                 3: "roadCornerLargerSand"}
 
 # Moves around the loop:
 #   ("s", tiles, rise, label)          straight; tiles may be None to be solved
@@ -164,6 +175,36 @@ TERRAIN_FALLOFF = 0.45
 # Scenery has to drop with it or everything stands fractionally off the ground.
 TERRAIN_SINK = 0.06
 
+# --- run-off ----------------------------------------------------------------
+#
+# Gravel goes where cars arrive fast enough to need it: a corner at the end of a
+# straight this long or longer. Every corner would be gravel everywhere, which
+# is neither how a circuit looks nor how one drives.
+SAND_MIN_APPROACH = 4
+
+# Where the kit's sand band sits, as a distance from the centre line. It starts
+# exactly at the edge of the road tile — 0.5, well outside the 0.345 lane — and
+# runs 0.53 further out. Measured off the meshes rather than guessed; see
+# SAND_BOX_SEGMENTS below for what is done with it.
+SAND_INNER = 0.5
+SAND_OUTER = 1.03
+
+# The physics region is a handful of boxes laid along the band, because a box is
+# what the level format and the collision code already speak. Six per quarter
+# turn tracks the arc to within about two centimetres, which is far finer than
+# anything a car can feel.
+SAND_BOX_SEGMENTS = 6
+
+# The sand decal and the road tile's own grass border lie in the same plane and
+# overlap, so one has to give. A centimetre is enough to settle it and still
+# leaves the gravel below the tarmac surface at +0.01, where it belongs.
+SAND_LIFT = 0.01
+
+# Barriers normally hug the track at 0.78. Where there is gravel they go behind
+# it instead, which is both how a real run-off is built and the only way a trap
+# can do its job — a barrier in the middle of one is just a wall to hit.
+SAND_BARRIER_OFFSET = 1.18
+
 
 # ---------------------------------------------------------------------------
 # Engine-space helpers. Positions are (x, z) with height carried separately.
@@ -216,8 +257,8 @@ def solve_corner(pos, heading, new_heading, n):
     raise RuntimeError(f"no corner rotation turns {heading} into {new_heading}")
 
 
-def arc_points(entry, heading, exit_pos, new_heading, radius, steps=12):
-    """Sample the quarter arc a corner piece describes.
+def arc_centre(entry, heading, exit_pos, radius):
+    """Centre of the turn a corner piece describes.
 
     The centre of a turn sits perpendicular to the direction of travel, never
     along it. Getting that wrong still produces an arc through both ports — the
@@ -225,19 +266,25 @@ def arc_points(entry, heading, exit_pos, new_heading, radius, steps=12):
     angles, putting a 90-degree kink in the racing line at every corner.
     """
     perp = (-heading[1], heading[0])
-    centre = None
     for sign in (1.0, -1.0):
         candidate = (entry[0] + perp[0] * radius * sign, entry[1] + perp[1] * radius * sign)
         if abs(math.dist(candidate, exit_pos) - radius) < 1e-4:
-            centre = candidate
-            break
-    if centre is None:
-        raise RuntimeError(f"no arc of radius {radius} joins {entry} to {exit_pos}")
+            return candidate
+    raise RuntimeError(f"no arc of radius {radius} joins {entry} to {exit_pos}")
 
+
+def arc_sweep(entry, heading, exit_pos, radius):
+    """(centre, spoke to the entry, signed sweep angle) for a corner's arc."""
+    centre = arc_centre(entry, heading, exit_pos, radius)
     v0 = (entry[0] - centre[0], entry[1] - centre[1])
     v1 = (exit_pos[0] - centre[0], exit_pos[1] - centre[1])
     cross = v0[0] * v1[1] - v0[1] * v1[0]
-    delta = math.pi / 2.0 if cross > 0 else -math.pi / 2.0
+    return centre, v0, (math.pi / 2.0 if cross > 0 else -math.pi / 2.0)
+
+
+def arc_points(entry, heading, exit_pos, new_heading, radius, steps=12):
+    """Sample the quarter arc a corner piece describes."""
+    centre, v0, delta = arc_sweep(entry, heading, exit_pos, radius)
 
     points = []
     for i in range(1, steps + 1):
@@ -447,8 +494,9 @@ def place_centred(name, centre_xz, theta, y=0.0, scale=1.0):
 def build_track(moves):
     """Walk the move list, placing road pieces and collecting the centre line.
 
-    Returns (centre_line, straight_cells) where centre_line holds (x, z, height)
-    triples in engine space.
+    Returns (centre_line, straight_cells, sand_arcs) where centre_line holds
+    (x, z, height) triples in engine space and sand_arcs describes the corners
+    that got a gravel run-off.
     """
     pos = (0.15, 0.0)          # a lane centre line sits on the half-unit lattice
     height = 0.0
@@ -458,10 +506,13 @@ def build_track(moves):
     centre_line = [(pos[0], pos[1], height)]
     straight_cells = []        # (cell_centre, theta, heading, height, pitch)
     tiles_placed = []          # (cell_centre, theta, width, depth) for validation
+    sand_arcs = []             # (entry, heading, exit, radius, height)
+    run_up = 0                 # tiles of straight leading into the next corner
 
     for move in moves:
         if move[0] == "s":
             _kind, tiles, rise, _label = move
+            run_up = tiles
             theta = math.atan2(heading[0], heading[1])
             step = rise / tiles if tiles else 0.0
             # A tile's length runs along its local +Y, but travel goes the other
@@ -487,6 +538,16 @@ def build_track(moves):
             place_tile(CORNER_BY_CELLS[cells], centre, theta, cells, cells, y=height)
             tiles_placed.append((centre, theta, cells, cells))
 
+            # Somewhere to end up when the braking zone at the end of a long
+            # straight goes wrong. The sand piece shares the corner's origin and
+            # footprint, so the same placement wraps it around the right side of
+            # the right arc; only the lift is its own.
+            if run_up >= SAND_MIN_APPROACH:
+                place_tile(SAND_BY_CELLS[cells], centre, theta, cells, cells,
+                           y=height + SAND_LIFT)
+                sand_arcs.append((pos, heading, exit_pos, cells - 0.5, height))
+            run_up = 0
+
             for point in arc_points(pos, heading, exit_pos, new_heading, cells - 0.5):
                 height += rise / 10.0
                 centre_line.append((point[0], point[1], height))
@@ -501,7 +562,7 @@ def build_track(moves):
     centre_line.pop()   # last point duplicates the first on a closed loop
     verify_line_on_tiles(centre_line, tiles_placed)
     verify_tile_heights(straight_cells, centre_line)
-    return centre_line, straight_cells
+    return centre_line, straight_cells, sand_arcs
 
 
 def verify_tile_heights(straight_cells, centre_line):
@@ -648,7 +709,7 @@ GRASS_VERGE_SCALE = (0.16, 0.34)
 GRASS_LIFT = 0.06
 
 
-def scatter_grass(centre_line, rng, meadow=300):
+def scatter_grass(centre_line, rng, sand, meadow=300):
     """Grass: a fringe hugging both verges, then patches out in the open field."""
     for i in range(len(centre_line)):
         p = centre_line[i]
@@ -663,6 +724,11 @@ def scatter_grass(centre_line, rng, meadow=300):
             # On the inside of a corner the offset line folds back towards the
             # tarmac, so measure against the whole loop, not just this point.
             if distance_to_line(spot, centre_line) < GRASS_VERGE_INNER:
+                continue
+            # The verge band runs straight through the run-offs. A tuft of grass
+            # in the middle of a gravel trap reads as a mistake, and worse, it
+            # hides the one piece of ground the player most needs to recognise.
+            if in_sand(spot, sand, margin=0.12):
                 continue
             # Against the blended ground, not this point's track height. The two
             # are close beside the tarmac but not equal, and where the blend
@@ -680,13 +746,15 @@ def scatter_grass(centre_line, rng, meadow=300):
         spot = (rng.uniform(lo[0], hi[0]), rng.uniform(lo[1], hi[1]))
         if distance_to_line(spot, centre_line) < BARRIER_CLEARANCE:
             continue
+        if in_sand(spot, sand, margin=0.12):
+            continue
         place_centred("grass", spot, rng.uniform(0.0, math.tau),
                       y=ground_height(spot, centre_line) + GRASS_LIFT,
                       scale=rng.uniform(*GRASS_SCALE))
         placed += 1
 
 
-def scatter_scenery(centre_line, rng):
+def scatter_scenery(centre_line, rng, sand):
     """Dress the circuit: barriers hugging the track, scenery further out."""
     lo, hi = field_bounds(centre_line)
 
@@ -702,6 +770,13 @@ def scatter_scenery(centre_line, rng):
                 continue
             offset = 0.78 + rng.uniform(0.0, 0.14)
             spot = (p[0] + left[0] * offset * side, p[1] + left[1] * offset * side)
+            # Behind the gravel rather than in it: a barrier a car reaches
+            # before the trap has slowed it down defeats the whole point.
+            if in_sand(spot, sand, margin=0.1):
+                offset = SAND_BARRIER_OFFSET
+                spot = (p[0] + left[0] * offset * side, p[1] + left[1] * offset * side)
+                if in_sand(spot, sand, margin=0.1):
+                    continue
             if distance_to_line(spot, centre_line) < BARRIER_CLEARANCE:
                 continue
             model = "barrierRed" if (i // 3) % 2 == 0 else "barrierWhite"
@@ -720,12 +795,98 @@ def scatter_scenery(centre_line, rng):
             spot = (rng.uniform(lo[0], hi[0]), rng.uniform(lo[1], hi[1]))
             if distance_to_line(spot, centre_line) < clearance:
                 continue
+            if in_sand(spot, sand, margin=0.2):
+                continue
             place_centred(model, spot, rng.uniform(0.0, math.tau),
                           y=ground_height(spot, centre_line))
             placed += 1
 
     # Last, so the tufts fill in around whatever the scenery above claimed.
-    scatter_grass(centre_line, rng)
+    scatter_grass(centre_line, rng, sand)
+
+
+# ---------------------------------------------------------------------------
+# Run-off gravel
+# ---------------------------------------------------------------------------
+
+def sand_boxes_for_arc(entry, heading, exit_pos, radius):
+    """Chop a corner's sand band into boxes the engine can test a car against.
+
+    The band is a quarter annulus and the level format speaks boxes, so the
+    sweep is cut into segments and each one gets a box straddling the band at
+    its middle. The boxes are inscribed rather than circumscribed: a sliver of
+    gravel at each seam goes unfelt, which nobody notices, whereas a box
+    bulging past the art would slow a car standing on clean grass.
+
+    Returns (centre, (half_radial, half_tangential), yaw) triples, with yaw the
+    engine's — a rotation about +Y, which is also the Blender Z rotation.
+    """
+    centre, v0, delta = arc_sweep(entry, heading, exit_pos, radius)
+
+    mid_radius = radius + (SAND_INNER + SAND_OUTER) / 2.0
+    half_radial = (SAND_OUTER - SAND_INNER) / 2.0
+    step = delta / SAND_BOX_SEGMENTS
+    half_tangential = mid_radius * math.sin(abs(step) / 2.0)
+
+    boxes = []
+    for i in range(SAND_BOX_SEGMENTS):
+        phi = step * (i + 0.5)
+        c, s = math.cos(phi), math.sin(phi)
+        spoke = ((v0[0] * c - v0[1] * s) / radius, (v0[0] * s + v0[1] * c) / radius)
+        spot = (centre[0] + spoke[0] * mid_radius, centre[1] + spoke[1] * mid_radius)
+        # The box runs along the arc, so its long axis is the tangent there.
+        tangent = (-spoke[1], spoke[0])
+        boxes.append((spot, (half_radial, half_tangential),
+                      math.atan2(tangent[0], tangent[1])))
+    return boxes
+
+
+def add_sand_volume(spot, half, yaw, y):
+    """Tag a patch of ground as gravel.
+
+    An empty rather than a mesh: nothing here is ever drawn, the box is the
+    whole of it, and a cube empty is what the add-on's Add Sand Trap button
+    drops for someone doing this by hand.
+    """
+    empty = bpy.data.objects.new("SandTrap", None)
+    empty.empty_display_type = "CUBE"
+    empty.empty_display_size = 1.0
+    empty.location = Vector((spot[0], -spot[1], y))
+    empty.rotation_euler.z = yaw
+    empty.scale = (half[0], half[1], 0.05)
+    empty[kr.PROP_TYPE] = "sand"
+    bpy.context.collection.objects.link(empty)
+    return empty
+
+
+def in_sand(spot, boxes, margin=0.0):
+    """True when (x, z) lands in a trap. Mirrors LevelInSandtrap()."""
+    for (cx, cz), (hx, hz), yaw in boxes:
+        c, s = math.cos(yaw), math.sin(yaw)
+        dx, dz = spot[0] - cx, spot[1] - cz
+        if abs(dx * c - dz * s) <= hx + margin and abs(dx * s + dz * c) <= hz + margin:
+            return True
+    return False
+
+
+def place_sand_traps(arcs, centre_line):
+    """Lay the physics boxes for every corner that got a run-off.
+
+    The art went down with the corner itself; this is the half a car feels.
+    """
+    boxes = []
+    for entry, heading, exit_pos, radius, height in arcs:
+        for spot, half, yaw in sand_boxes_for_arc(entry, heading, exit_pos, radius):
+            add_sand_volume(spot, half, yaw, height + SAND_LIFT)
+            boxes.append((spot, half, yaw))
+
+    # Gravel on the racing line would be a bug in the geometry above, not a
+    # judgement call, so it is an assertion rather than a warning.
+    stray = [p for p in centre_line if in_sand((p[0], p[1]), boxes)]
+    if stray:
+        raise RuntimeError(f"{len(stray)} centre-line point(s) sit in a sand trap, "
+                           f"first at ({stray[0][0]:.2f}, {stray[0][1]:.2f})")
+    return boxes
 
 
 def place_lamp(centre_xz, height, energy, reach, colour=(1.0, 0.86, 0.62),
@@ -753,7 +914,7 @@ def place_lamp(centre_xz, height, energy, reach, colour=(1.0, 0.86, 0.62),
     return obj
 
 
-def place_light_posts(centre_line, rng, spacing=13, offset=1.05):
+def place_light_posts(centre_line, rng, sand, spacing=13, offset=1.05):
     """Line the circuit with lamp posts, each carrying a real point light."""
     count = len(centre_line)
     placed = 0
@@ -765,6 +926,11 @@ def place_light_posts(centre_line, rng, spacing=13, offset=1.05):
 
         spot = (p[0] + left[0] * offset * side, p[1] + left[1] * offset * side)
         if distance_to_line(spot, centre_line) < BARRIER_CLEARANCE + 0.2:
+            continue
+        # A lamp post is a collider, and one standing in a run-off is a tree in
+        # a gravel trap. The far side is no better — this offset would only
+        # cross the track — so the post is simply skipped.
+        if in_sand(spot, sand, margin=0.15):
             continue
 
         base = ground_height(spot, centre_line)
@@ -951,7 +1117,7 @@ def build_circuit(circuit):
 
     print(f"=== {circuit['name']} ({circuit['slug']}) ===")
     moves = balance_elevation(solve_track(circuit["moves"]))
-    centre_line, straight_cells = build_track(moves)
+    centre_line, straight_cells, sand_arcs = build_track(moves)
 
     heights = [p[2] for p in centre_line]
     lap = sum(math.dist(centre_line[i][:2], centre_line[(i + 1) % len(centre_line)][:2])
@@ -967,10 +1133,16 @@ def build_circuit(circuit):
                       key=lambda i: (centre_line[i][0] - start_cell[0]) ** 2 +
                                     (centre_line[i][1] - start_cell[1]) ** 2)
 
+    # Before the scenery: everything placed after this has to keep out of the
+    # gravel, and the boxes are what say where the gravel is.
+    sand = place_sand_traps(sand_arcs, centre_line)
+    print(f"[track] {len(sand_arcs)} sand traps ({len(sand)} boxes) on corners "
+          f"reached from {SAND_MIN_APPROACH}+ tile straights")
+
     add_start_dressing(start_cell, heading, start_height, centre_line)
-    lamps = place_light_posts(centre_line, rng)
+    lamps = place_light_posts(centre_line, rng, sand)
     print(f"[track] {lamps} lamp posts")
-    scatter_scenery(centre_line, rng)
+    scatter_scenery(centre_line, rng, sand)
     add_racing_line(centre_line, settings.track_width)
     add_spawns(centre_line, start_index)
     add_checkpoints(centre_line, start_index, settings.track_width)
@@ -981,8 +1153,9 @@ def build_circuit(circuit):
     data = kr.write_level(bpy.context, out_json)
     print(f"[export] {out_json}")
     print(f"[export] props={len(data['props'])} colliders={len(data['colliders'])} "
-          f"spawns={len(data['spawns'])} waypoints={len(data['waypoints'])} "
-          f"checkpoints={len(data['checkpoints'])} lights={len(data['lights'])}")
+          f"sandtraps={len(data['sandtraps'])} spawns={len(data['spawns'])} "
+          f"waypoints={len(data['waypoints'])} checkpoints={len(data['checkpoints'])} "
+          f"lights={len(data['lights'])}")
 
     bpy.ops.wm.save_as_mainfile(filepath=out_blend)
     print(f"[export] {out_blend}")

@@ -43,7 +43,7 @@ LEVEL_VERSION = 1
 
 # Custom properties used to tag objects.
 PROP_PREFAB = "kr_prefab"      # str: kit model name, marks an object as a prop
-PROP_TYPE = "kr_type"          # str: spawn | checkpoint | racingline | collider
+PROP_TYPE = "kr_type"          # str: spawn | checkpoint | racingline | collider | sand
 PROP_INDEX = "kr_index"        # int: ordering for spawns and checkpoints
 PROP_WIDTH = "kr_width"        # float: gate or track width override
 PROP_SOLID = "kr_solid"        # bool: emit a collider for this prop
@@ -444,6 +444,25 @@ class KR_OT_add_racingline(Operator):
         return {"FINISHED"}
 
 
+class KR_OT_add_sandtrap(Operator):
+    bl_idname = "kr.add_sandtrap"
+    bl_label = "Add Sand Trap"
+    bl_description = ("Add a box of run-off gravel. Cars that leave the track inside it bog "
+                      "down. Scale and rotate it to cover the run-off; lay the kit's sand "
+                      "pieces on top for the look")
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        empty = _add_empty(context, "SandTrap", "CUBE", 1.0)
+        empty[PROP_TYPE] = "sand"
+        empty.scale = (0.5, 0.5, 0.05)      # a flat patch, not a block
+        bpy.ops.object.select_all(action="DESELECT")
+        empty.select_set(True)
+        context.view_layer.objects.active = empty
+        self.report({"INFO"}, "Scale the cube over the gravel; only its footprint matters")
+        return {"FINISHED"}
+
+
 class KR_OT_add_light(Operator):
     bl_idname = "kr.add_light"
     bl_label = "Add Light"
@@ -554,7 +573,18 @@ def collect_racing_line(obj, spacing):
 
 
 def object_box(obj):
-    """Local bounding box centre and half extents, with object scale applied."""
+    """Local bounding box centre and half extents, with object scale applied.
+
+    An empty has no geometry to measure, so its display cube stands in. That is
+    what the user actually drags in the viewport, and for a volume that is only
+    ever a box — a blocking box, a sand trap — it is the whole definition.
+    """
+    if obj.type == "EMPTY":
+        size = obj.empty_display_size
+        scale = obj.matrix_world.to_scale()
+        half = Vector((abs(size * scale.x), abs(size * scale.y), abs(size * scale.z)))
+        return obj.matrix_world.translation.copy(), half
+
     corners = [Vector(c) for c in obj.bound_box]
     lo = Vector((min(c.x for c in corners), min(c.y for c in corners), min(c.z for c in corners)))
     hi = Vector((max(c.x for c in corners), max(c.y for c in corners), max(c.z for c in corners)))
@@ -626,11 +656,21 @@ def distance_to_ring(point, ring):
     return math.sqrt(best)
 
 
+def box_contains(entry, point):
+    """Point-in-box on the engine's XZ plane. Mirrors LevelInSandtrap()."""
+    theta = math.radians(entry["yaw"])
+    c, s = math.cos(theta), math.sin(theta)
+    dx = point[0] - entry["pos"][0]
+    dz = point[1] - entry["pos"][2]
+    return (abs(dx * c - dz * s) <= entry["half"][0] and
+            abs(dx * s + dz * c) <= entry["half"][1])
+
+
 def build_level_dict(context, report=None):
     scene = context.scene
     settings = scene.kr_level
 
-    props, colliders, spawns, checkpoints, lights = [], [], [], [], []
+    props, colliders, sandtraps, spawns, checkpoints, lights = [], [], [], [], [], []
     racing_lines = []
     sun = None
 
@@ -676,6 +716,15 @@ def build_level_dict(context, report=None):
                 "yaw": round(engine_yaw_degrees(obj), 3),
             })
             continue
+        if kind == "sand":
+            # No height: a trap is a patch of ground, not a volume to bump into.
+            centre, half = object_box(obj)
+            sandtraps.append({
+                "pos": to_engine_point(centre),
+                "half": [round(half.x, 4), round(half.y, 4)],
+                "yaw": round(engine_yaw_degrees(obj), 3),
+            })
+            continue
 
         if prefab:
             position, rotation, scale = decompose_engine(obj.matrix_world)
@@ -715,6 +764,15 @@ def build_level_dict(context, report=None):
         colliders = kept
     if blocked and report:
         report({"WARNING"}, f"{blocked} collider(s) dropped for intruding on the track")
+
+    # A trap reaching the racing line would put gravel on the lane itself. The
+    # engine would shrug — a car on the tarmac is on the tarmac whatever box it
+    # is standing in — but the art would be wrong, so say so rather than fix it.
+    if waypoint_ring and report:
+        on_line = sum(1 for trap in sandtraps
+                      if any(box_contains(trap, p) for p in waypoint_ring))
+        if on_line:
+            report({"WARNING"}, f"{on_line} sand trap(s) reach the racing line")
 
     spawns.sort(key=lambda o: o.get(PROP_INDEX, 0))
     checkpoints.sort(key=lambda o: o.get(PROP_INDEX, 0))
@@ -761,6 +819,7 @@ def build_level_dict(context, report=None):
         "lights": lights,
         "props": props,
         "colliders": colliders,
+        "sandtraps": sandtraps,
         "spawns": [
             {"pos": to_engine_point(o.matrix_world.translation),
              "yaw": round(engine_yaw_degrees(o), 3)}
@@ -797,8 +856,8 @@ class KR_OT_export_level(Operator, ExportHelper):
         data = write_level(context, self.filepath, self.report)
         self.report({"INFO"},
                     f"{len(data['props'])} props, {len(data['waypoints'])} waypoints, "
-                    f"{len(data['colliders'])} colliders, {len(data['lights'])} lights "
-                    f"-> {os.path.basename(self.filepath)}")
+                    f"{len(data['colliders'])} colliders, {len(data['sandtraps'])} sand traps, "
+                    f"{len(data['lights'])} lights -> {os.path.basename(self.filepath)}")
         return {"FINISHED"}
 
 
@@ -825,7 +884,7 @@ class KR_OT_validate(Operator):
             self.report({"INFO"},
                         f"OK — {len(data['props'])} props, {len(data['spawns'])} spawns, "
                         f"{len(data['waypoints'])} waypoints, {len(data['colliders'])} colliders, "
-                        f"{len(data['lights'])} lights")
+                        f"{len(data['sandtraps'])} sand traps, {len(data['lights'])} lights")
         return {"FINISHED"}
 
 
@@ -862,6 +921,7 @@ class KR_PT_panel(Panel):
         row = box.row(align=True)
         row.operator(KR_OT_tag_collider.bl_idname, text="Tag Solid").clear = False
         row.operator(KR_OT_tag_collider.bl_idname, text="Clear Solid").clear = True
+        box.operator(KR_OT_add_sandtrap.bl_idname, icon="MOD_OCEAN")
 
         box = layout.box()
         box.label(text="Lighting", icon="LIGHT")
@@ -896,6 +956,7 @@ CLASSES = (
     KR_OT_add_spawn,
     KR_OT_add_checkpoint,
     KR_OT_add_racingline,
+    KR_OT_add_sandtrap,
     KR_OT_add_light,
     KR_OT_tag_collider,
     KR_OT_export_level,

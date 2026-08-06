@@ -130,7 +130,8 @@ desktop build is the one to use inside a normal X or Wayland session.
 engine/          reusable, game-agnostic
   arena.*        bump allocator: a level is one allocation, freed in one call
   json.*         dependency-free JSON reader used by the level loader
-  level.*        level file -> props, colliders, spawns, waypoints, checkpoints
+  level.*        level file -> props, colliders, sand traps, spawns, waypoints,
+                 checkpoints
   spline.*       closed centre line: arc length, nearest point, width, gradient
   collide.*      oriented boxes on XZ, SAT, uniform-grid broadphase
   light.*        point and spot lights, per-draw relevance selection
@@ -171,6 +172,21 @@ cutting the course does not advance you.
 **Drivability from the racing line.** There are no invisible track walls. The
 centre line carries a width; inside it you are on tarmac, outside it grip and top
 speed drop. Solid objects (barriers, trees, grandstands) are real colliders.
+
+**Run-off.** Corners reached from a long straight have a gravel trap on the
+outside, drawn with the kit's sand pieces and felt through a list of boxes in the
+level file. Neither is derived from the other — the art is a mesh, the physics is
+a region — so the tests are what hold them together: no trap may cover the racing
+line, every trap has to be reachable by running wide, and a car dropped into one
+flat out has to be walking a second later.
+
+Gravel is deliberately not a slower line through the corner. Top speed falls to
+30% and a heavy drag holds full throttle to about 0.95 u/s, a seventh of the pace
+on tarmac; you crawl out sideways or the marshals lift you back to the line after
+six seconds. Nothing solid is ever placed inside a trap, and the barriers that
+would normally hug the track are pushed out behind the gravel, exactly as they
+are on a real circuit — a barrier a car reaches before the trap has slowed it
+down is just a wall to hit.
 
 **Elevation.** The centre line carries height and gradient. Driving stays a 2D
 problem on the XZ plane — collision, steering and lap progress all ignore Y —
@@ -228,13 +244,18 @@ The fastest way in is to open `levels/circuit01.blend` and edit the demo circuit
 5. **Mark obstacles.** Scenery prefabs (barriers, trees, grandstands…) get
    colliders automatically. *Tag Solid* forces one onto any other object, and
    tagging an object with no prefab turns it into an invisible blocking volume.
-6. **Light it.** *Point Light* / *Spot Light* drop a lamp at the cursor, but any
+6. **Dig run-off.** *Add Sand Trap* drops a cube gizmo; scale and rotate it over
+   the gravel and any car that leaves the road inside it bogs down. Only the
+   footprint counts, nothing is drawn from it, and nothing about it is solid —
+   lay the kit's `roadCorner*Sand` pieces on top for the look. *Validate Level*
+   warns if a trap reaches the racing line.
+7. **Light it.** *Point Light* / *Spot Light* drop a lamp at the cursor, but any
    Blender lamp exports — including ones you add through Blender's own *Add ▸
    Light* menu. Tune **Power** and **Custom Distance** in the light's data
    properties; a **Sun** lamp becomes the level's key light, taking its
    direction, colour and strength. *Sun* and *Ambient* in the panel set the
    daylight balance.
-7. **Check and export.** *Validate Level* reports anything missing; *Export
+8. **Check and export.** *Validate Level* reports anything missing; *Export
    Level* writes the JSON. Level name, lap count, track width and colours live in
    the same panel.
 
@@ -302,6 +323,9 @@ at placement time instead (see `place_centred`).
   "colliders": [                   // solid, solved on the XZ plane
     { "pos": [0, 0.06, 0], "half": [0.125, 0.06], "height": 0.13, "yaw": 90 }
   ],
+  "sandtraps": [                   // run-off gravel: slow, not solid, no height
+    { "pos": [3.7, 0, 12.1], "half": [0.265, 0.296], "yaw": 22.5 }
+  ],
   "lights": [                      // point and spot lights
     { "type": "point", "pos": [1.2, 0.72, 8.0],
       "color": [255, 219, 158, 255], "intensity": 2.1, "range": 3.0 },
@@ -337,6 +361,11 @@ that lap times are plausible, that the field is not crawling, and that no
 collider intrudes on the racing surface. That last check is what caught scenery
 being placed on the racing line.
 
+The run-off is tested the same way round: the surfaces are measured against each
+other (a second flat out covers 5.6 units of tarmac, 3.4 of grass and 1.1 of
+gravel), and then a car is dropped off the road at every trap on every circuit
+and has to be down to a walking pace a second later.
+
 Tuning lives in `CarDefaultTuning()` in `game/src/car.c`; `make test` reports lap
 times, so it doubles as a tuning loop.
 
@@ -355,6 +384,12 @@ The layout is a list of moves in `TRACK`; the script solves two straight lengths
 so the loop closes in plan, spreads any leftover gradient so it closes in
 elevation, and then asserts that every centre-line point lands on a placed road
 tile.
+
+Gravel goes on the outside of every corner reached from a straight of four tiles
+or more — six of the ten corners here, thirteen on the Eifel lap. The kit's
+sand piece shares its corner's origin and footprint, so the same placement that
+lays the corner wraps the run-off around the right side of it; the boxes the
+engine tests against are cut from the same arc, six to a quarter turn.
 
 ## Credits
 

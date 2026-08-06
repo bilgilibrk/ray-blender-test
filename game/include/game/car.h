@@ -29,6 +29,7 @@ typedef struct CarTuning {
 
     float gripTarmac;           // lateral velocity decay rate, 1/s
     float gripGrass;
+    float gripSand;
     float handbrakeGrip;        // multiplier applied to grip when handbraking
 
     // Pull of a gradient along the road, in world units per second squared.
@@ -39,6 +40,8 @@ typedef struct CarTuning {
     float halfWidth;            // collision box, world units
     float halfLength;
     float offTrackSpeedScale;   // top-speed multiplier off the tarmac
+    float sandSpeedScale;       // top-speed multiplier in a gravel trap
+    float sandDrag;             // extra linear drag there, 1/s
 } CarTuning;
 
 CarTuning CarDefaultTuning(void);
@@ -56,6 +59,7 @@ typedef struct CarInput {
 typedef struct CarSurface {
     float grip;                 // lateral velocity decay rate, 1/s
     float speedScale;           // multiplier on top speed
+    float drag;                 // extra linear drag from the surface itself, 1/s
     float grade;                // rise over run along the direction of travel
     float height;               // surface height under the car
 } CarSurface;
@@ -77,6 +81,7 @@ typedef struct Car {
     float yawRate;
     float slopeAccel;           // gravity's contribution this tick, for the HUD
     bool onTrack;
+    bool inSand;                // bogged down in a run-off trap
 } Car;
 
 void CarInit(Car *car, Vector2 position, float yaw);

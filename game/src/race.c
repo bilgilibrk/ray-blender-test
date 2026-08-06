@@ -322,15 +322,26 @@ void RaceUpdate(Race *race, CarInput playerInput, float dt)
         Vector3 here = { racer->car.position.x, racer->car.height, racer->car.position.y };
         SplineQuery q = SplineClosest(race->spline, here, &p->splineHint);
         bool onTrack = fabsf(q.lateral) <= q.halfWidth;
+        // Only a car that has already left the tarmac can be in the gravel, so
+        // the lane is what decides drivability and the trap list is consulted
+        // second — which also keeps the scan off the hot path for a whole field
+        // that is where it should be.
+        bool inSand = !onTrack && LevelInSandtrap(race->level, racer->car.position.x,
+                                                  racer->car.position.y);
         racer->car.onTrack = onTrack;
+        racer->car.inSand = inSand;
 
         // The grade is signed along the centre line, so a car facing back down
         // the track has to see it reversed or a climb would push it along.
         Vector2 forward = CarForward(&racer->car);
         float alignment = forward.x * q.tangent.x + forward.y * q.tangent.z;
         CarSurface surface = {
-            .grip = onTrack ? race->tuning.gripTarmac : race->tuning.gripGrass,
-            .speedScale = onTrack ? 1.0f : race->tuning.offTrackSpeedScale,
+            .grip = onTrack ? race->tuning.gripTarmac
+                            : (inSand ? race->tuning.gripSand : race->tuning.gripGrass),
+            .speedScale = onTrack ? 1.0f
+                                  : (inSand ? race->tuning.sandSpeedScale
+                                            : race->tuning.offTrackSpeedScale),
+            .drag = inSand ? race->tuning.sandDrag : 0.0f,
             .grade = (alignment < 0.0f) ? -q.grade : q.grade,
             .height = q.position.y,
         };

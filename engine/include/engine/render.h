@@ -169,6 +169,7 @@ void RenderGroundPlane(Vector3 center, float size, Color color);
 // --- debug -------------------------------------------------------------------
 
 void RenderDebugColliders(const Level *level, Color color);
+void RenderDebugSandtraps(const Level *level, Color color);
 void RenderDebugSpline(const Spline *spline, Color color);
 void RenderDebugCheckpoints(const Level *level, Color color);
 
