@@ -61,8 +61,11 @@ sudo apt-get install -y --no-install-recommends \
 pacman -S --needed mingw-w64-x86_64-gcc make git
 ```
 
-On Windows, build from the MinGW64 shell (or Git Bash with a MinGW gcc): the
-Makefile uses `sh`, `mkdir -p` and `rm`, which `cmd.exe` does not provide.
+On Windows, build from a shell that provides `sh`, `mkdir -p` and `rm` — an
+MSYS2 MinGW64 shell, or Git Bash with a MinGW `gcc` and `make` on PATH. Plain
+`cmd.exe` will not work. Toolchains often install to paths with spaces and
+brackets (`C:/Program Files (x86)/GnuWin32/bin/make`); the Makefile quotes those
+where it needs to, so that is fine.
 
 The desktop and DRM builds each get their own raylib, configured differently
 (OpenGL 3.3 vs GLES2) and kept in `build/<platform>/libraylib.a`, so you can

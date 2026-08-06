@@ -40,6 +40,10 @@ RAYLIB_LIB := $(BUILD)/libraylib.a
 # ---------------------------------------------------------------------------
 ifeq ($(PLATFORM),drm)
   # Renders straight to /dev/dri with no window system. Linux only.
+  ifneq ($(HOST),Linux)
+    $(error PLATFORM=drm needs Linux with DRM/KMS; this host is $(HOST). Use the default \
+            desktop build instead)
+  endif
   RAYLIB_PLATFORM := PLATFORM_DRM
   RAYLIB_GRAPHICS := GRAPHICS_API_OPENGL_ES2
   PLATFORM_CFLAGS := -DENGINE_PLATFORM_DRM
@@ -70,8 +74,12 @@ endif
 # RAYLIB_RELEASE_PATH must be absolute: raylib's Makefile runs from its own
 # directory. Objects stay in raylib's tree, which its .gitignore already covers,
 # so building leaves the submodule clean.
+#
+# Both this and $(MAKE) are quoted at every use below. On Windows they routinely
+# contain spaces and brackets — "C:/Program Files (x86)/GnuWin32/bin/make" — and
+# an unquoted expansion is a shell syntax error, not a missing-file error.
 RAYLIB_MAKEFLAGS := PLATFORM=$(RAYLIB_PLATFORM) GRAPHICS=$(RAYLIB_GRAPHICS) \
-                    RAYLIB_RELEASE_PATH=$(abspath $(BUILD)) $(RAYLIB_SHELL)
+                    RAYLIB_RELEASE_PATH="$(abspath $(BUILD))" $(RAYLIB_SHELL)
 
 WARNINGS := -Wall -Wextra -Wno-unused-parameter -Wshadow -Wpointer-arith -Wcast-align \
             -Wstrict-prototypes -Wmissing-prototypes
@@ -113,8 +121,8 @@ raylib: $(RAYLIB_LIB)
 $(RAYLIB_LIB): $(RAYLIB_SRC)/raylib.h
 	@mkdir -p $(BUILD)
 	@echo "building raylib for $(RAYLIB_PLATFORM) ($(RAYLIB_GRAPHICS))"
-	$(MAKE) -C $(RAYLIB_SRC) clean $(RAYLIB_MAKEFLAGS)
-	$(MAKE) -C $(RAYLIB_SRC) $(RAYLIB_MAKEFLAGS)
+	"$(MAKE)" -C $(RAYLIB_SRC) clean $(RAYLIB_MAKEFLAGS)
+	"$(MAKE)" -C $(RAYLIB_SRC) $(RAYLIB_MAKEFLAGS)
 
 # Present only when the submodule has not been checked out.
 $(RAYLIB_SRC)/raylib.h:
@@ -159,7 +167,7 @@ level:
 clean:
 	rm -rf build
 	@if [ -f $(RAYLIB_SRC)/Makefile ]; then \
-	    $(MAKE) -C $(RAYLIB_SRC) clean $(RAYLIB_MAKEFLAGS) >/dev/null 2>&1 || true; \
+	    "$(MAKE)" -C $(RAYLIB_SRC) clean $(RAYLIB_MAKEFLAGS) >/dev/null 2>&1 || true; \
 	fi
 
 -include $(ENGINE_OBJ:.o=.d) $(GAME_OBJ:.o=.d)
