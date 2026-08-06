@@ -355,7 +355,14 @@ static void UploadLightsFor(Vector3 center, float radius)
 // Static batching
 // ---------------------------------------------------------------------------
 
-typedef struct ChunkKey { int x, z; } ChunkKey;
+// `decal` splits flat, ground-hugging props into chunks of their own so the
+// shadow pass can leave them out. See BatchChunk::castsShadow.
+typedef struct ChunkKey { int x, z, decal; } ChunkKey;
+
+// Vertical extent under which a prop counts as lying in the ground rather than
+// standing on it. The kit's grass patch is a single quad exactly 0 tall; the
+// shortest thing that should still cast is a kerb, an order of magnitude up.
+#define PROP_DECAL_HEIGHT 0.02f
 
 typedef struct ChunkBuild {
     ChunkKey key;
@@ -389,9 +396,27 @@ static int PropVertexCount(const LevelProp *p)
 static int FindChunk(ChunkBuild *chunks, int count, ChunkKey key)
 {
     for (int i = 0; i < count; i++) {
-        if (chunks[i].key.x == key.x && chunks[i].key.z == key.z) return i;
+        if (chunks[i].key.x == key.x && chunks[i].key.z == key.z &&
+            chunks[i].key.decal == key.decal) return i;
     }
     return -1;
+}
+
+// Height of a prop once placed, so a flat one can be told from a standing one.
+static bool PropIsDecal(const LevelProp *p)
+{
+    BoundingBox local = AssetsGetModelBounds(p->model);
+    Matrix world = PropMatrix(p);
+    float lowest = 1e30f, highest = -1e30f;
+    for (int i = 0; i < 8; i++) {
+        Vector3 corner = { (i & 1) ? local.max.x : local.min.x,
+                           (i & 2) ? local.max.y : local.min.y,
+                           (i & 4) ? local.max.z : local.min.z };
+        float y = Vector3Transform(corner, world).y;
+        if (y < lowest) lowest = y;
+        if (y > highest) highest = y;
+    }
+    return (highest - lowest) <= PROP_DECAL_HEIGHT;
 }
 
 // Appends one prop's triangles into a chunk's arrays.
@@ -483,7 +508,8 @@ bool StaticBatchBuild(StaticBatch *batch, const Level *level, float chunkSize)
     for (int i = 0; i < level->propCount; i++) {
         const LevelProp *p = &level->props[i];
         ChunkKey key = { (int)floorf(p->position.x / chunkSize),
-                         (int)floorf(p->position.z / chunkSize) };
+                         (int)floorf(p->position.z / chunkSize),
+                         PropIsDecal(p) ? 1 : 0 };
         int ci = FindChunk(chunks, chunkCount, key);
         int verts = PropVertexCount(p);
 
@@ -491,6 +517,7 @@ bool StaticBatchBuild(StaticBatch *batch, const Level *level, float chunkSize)
             ci = -1;   // full: start another chunk with the same key
             for (int j = 0; j < chunkCount; j++) {
                 if (chunks[j].key.x == key.x && chunks[j].key.z == key.z &&
+                    chunks[j].key.decal == key.decal &&
                     chunks[j].vertexCount + verts <= BATCH_MAX_VERTS_PER_CHUNK) { ci = j; break; }
             }
         }
@@ -541,6 +568,7 @@ bool StaticBatchBuild(StaticBatch *batch, const Level *level, float chunkSize)
 
         batch->chunks[live].mesh = mesh;
         batch->chunks[live].bounds = chunks[c].bounds;
+        batch->chunks[live].castsShadow = (chunks[c].key.decal == 0);
         batch->totalTriangles += mesh.triangleCount;
         live++;
     }
@@ -673,6 +701,8 @@ void RenderBeginShadowPass(Vector3 focus)
     rlSetMatrixModelview(view);
 }
 
+bool RenderInShadowPass(void) { return g_render.shadowPass; }
+
 void RenderEndShadowPass(void)
 {
     if (!g_render.shadowPass) return;
@@ -693,8 +723,10 @@ void StaticBatchDraw(StaticBatch *batch, Camera3D camera)
     batch->drawnLastFrame = 0;
     if (!batch->ready || batch->chunkCount == 0) return;
 
+    bool shadowPass = RenderInShadowPass();
     Frustum frustum = RenderFrustumFromCamera(camera);
     for (int i = 0; i < batch->chunkCount; i++) {
+        if (shadowPass && !batch->chunks[i].castsShadow) continue;
         if (!RenderFrustumTestBox(&frustum, batch->chunks[i].bounds)) continue;
         RenderDrawLitMesh(batch->chunks[i].mesh, batch->material, MatrixIdentity(),
                           batch->chunks[i].bounds);

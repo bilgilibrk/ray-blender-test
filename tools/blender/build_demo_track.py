@@ -89,6 +89,11 @@ BARRIER_CLEARANCE = 0.68
 # renderer builds. See HeightFromSpline in engine/src/terrain.c.
 TERRAIN_FALLOFF = 0.45
 
+# The renderer drops the ground this far below the blended track height so the
+# tarmac is never eaten by the grass beside it — TerrainSettings.sinkBelowTrack.
+# Scenery has to drop with it or everything stands fractionally off the ground.
+TERRAIN_SINK = 0.06
+
 
 # ---------------------------------------------------------------------------
 # Engine-space helpers. Positions are (x, z) with height carried separately.
@@ -287,11 +292,13 @@ def get_prefab_mesh(name):
     return mesh
 
 
-def _link(name, mesh, location, yaw):
+def _link(name, mesh, location, yaw, scale=1.0):
     """Create an object at an engine-space location with a yaw about the up axis."""
     obj = bpy.data.objects.new(name, mesh)
     obj[kr.PROP_PREFAB] = name
-    obj.matrix_world = Matrix.Translation(location) @ Matrix.Rotation(yaw, 4, "Z")
+    obj.matrix_world = (Matrix.Translation(location)
+                        @ Matrix.Rotation(yaw, 4, "Z")
+                        @ Matrix.Scale(scale, 4))
     bpy.context.collection.objects.link(obj)
     return obj
 
@@ -350,16 +357,17 @@ def prefab_centre(name):
     return centre
 
 
-def place_centred(name, centre_xz, theta, y=0.0):
+def place_centred(name, centre_xz, theta, y=0.0, scale=1.0):
     """Place a prefab so its geometry is centred on engine (x, z)."""
     cx, cy = prefab_centre(name)
+    cx, cy = cx * scale, cy * scale
     c, s = math.cos(theta), math.sin(theta)
     offset_x = cx * c - cy * s
     offset_y = cx * s + cy * c
 
     mesh = get_prefab_mesh(name)
     location = Vector((centre_xz[0] - offset_x, -centre_xz[1] - offset_y, y))
-    return _link(name, mesh, location, theta)
+    return _link(name, mesh, location, theta, scale)
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +510,8 @@ def ground_height(point, centre_line):
         w = 1.0 / (d2 * d2 + TERRAIN_FALLOFF)
         weighted += cy * w
         total += w
-    return weighted / total if total else 0.0
+    blended = weighted / total if total else 0.0
+    return blended - TERRAIN_SINK
 
 
 def distance_to_line(point, centre_line):
@@ -529,12 +538,87 @@ def tangent_at(centre_line, i):
     return (t[0] / length, t[1] / length)
 
 
-def scatter_scenery(centre_line, rng):
-    """Dress the circuit: barriers hugging the track, scenery further out."""
+def field_bounds(centre_line, margin=8.0):
+    """Axis-aligned box around the loop, with room to spare outside it."""
     xs = [p[0] for p in centre_line]
     zs = [p[1] for p in centre_line]
-    lo = (min(xs) - 8.0, min(zs) - 8.0)
-    hi = (max(xs) + 8.0, max(zs) + 8.0)
+    return ((min(xs) - margin, min(zs) - margin),
+            (max(xs) + margin, max(zs) + margin))
+
+
+# The kit's grass prefab is a single flat quad about a tile across, so it is a
+# ground patch rather than a tuft — which suits a camera looking almost straight
+# down, where anything upright would be seen edge-on. Scattered at varied size
+# and angle the quads break the bare sheet of terrain into something with
+# texture; left at one size they just read as dropped paper.
+GRASS_SCALE = (0.35, 0.85)
+
+# Clear of the road *tile*, not just the lane: a tile spans its whole grid cell,
+# so its mesh reaches 0.5 from the centre line even though the drivable lane
+# stops at 0.345. Grass inside that is simply buried under the tarmac. The strip
+# between there and the barriers at 0.68 is what is left to plant. "grass" is
+# deliberately absent from the exporter's solid-prefab list, so none of it
+# becomes a collider and a car running wide drives straight over it.
+GRASS_VERGE_INNER = 0.58
+GRASS_VERGE_OUTER = 0.72
+
+# Smaller than the open-field patches: the strip is only about 0.2 wide, and a
+# full-size quad would spend most of itself under the road.
+GRASS_VERGE_SCALE = (0.16, 0.34)
+
+# Lift clear of the terrain, or the quads z-fight with it and mostly lose.
+#
+# Flush is not good enough. The renderer blends its ground over a resampled,
+# smoothed spline (~0.22 apart) while this script blends over the raw waypoints
+# (~0.45 apart), then rasterises the result onto a 0.4 grid. The two agree to
+# about a millimetre on average but drift locally, so the margin has to cover
+# the drift rather than the mean. Nothing casts a shadow from this height —
+# grass batches as a decal — so the only cost is how flat it looks, and at this
+# scale six centimetres is invisible from above.
+GRASS_LIFT = 0.06
+
+
+def scatter_grass(centre_line, rng, meadow=300):
+    """Grass: a fringe hugging both verges, then patches out in the open field."""
+    for i in range(len(centre_line)):
+        p = centre_line[i]
+        tangent = tangent_at(centre_line, i)
+        left = (-tangent[1], tangent[0])
+
+        for side in (-1, 1):
+            if rng.random() < 0.45:
+                continue
+            offset = rng.uniform(GRASS_VERGE_INNER, GRASS_VERGE_OUTER)
+            spot = (p[0] + left[0] * offset * side, p[1] + left[1] * offset * side)
+            # On the inside of a corner the offset line folds back towards the
+            # tarmac, so measure against the whole loop, not just this point.
+            if distance_to_line(spot, centre_line) < GRASS_VERGE_INNER:
+                continue
+            # Against the blended ground, not this point's track height. The two
+            # are close beside the tarmac but not equal, and where the blend
+            # rides higher — the inside of a climbing corner — grass pinned to
+            # the track height is buried under the terrain and never seen.
+            place_centred("grass", spot, rng.uniform(0.0, math.tau),
+                          y=ground_height(spot, centre_line) + GRASS_LIFT,
+                          scale=rng.uniform(*GRASS_VERGE_SCALE))
+
+    lo, hi = field_bounds(centre_line)
+    placed = 0
+    for _ in range(meadow * 40):
+        if placed >= meadow:
+            break
+        spot = (rng.uniform(lo[0], hi[0]), rng.uniform(lo[1], hi[1]))
+        if distance_to_line(spot, centre_line) < BARRIER_CLEARANCE:
+            continue
+        place_centred("grass", spot, rng.uniform(0.0, math.tau),
+                      y=ground_height(spot, centre_line) + GRASS_LIFT,
+                      scale=rng.uniform(*GRASS_SCALE))
+        placed += 1
+
+
+def scatter_scenery(centre_line, rng):
+    """Dress the circuit: barriers hugging the track, scenery further out."""
+    lo, hi = field_bounds(centre_line)
 
     count = len(centre_line)
     for i in range(0, count, 3):
@@ -569,6 +653,9 @@ def scatter_scenery(centre_line, rng):
             place_centred(model, spot, rng.uniform(0.0, math.tau),
                           y=ground_height(spot, centre_line))
             placed += 1
+
+    # Last, so the tufts fill in around whatever the scenery above claimed.
+    scatter_grass(centre_line, rng)
 
 
 def place_lamp(centre_xz, height, energy, reach, colour=(1.0, 0.86, 0.62),

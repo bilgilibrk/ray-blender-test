@@ -76,6 +76,10 @@ bool RenderShadowsEnabled(void);
 void RenderBeginShadowPass(Vector3 focus);
 void RenderEndShadowPass(void);
 
+// True between those two, for geometry that needs to know it is being drawn
+// for the sun rather than for the player.
+bool RenderInShadowPass(void);
+
 // --- culling and lit draws --------------------------------------------------
 
 typedef struct Frustum {
@@ -99,6 +103,12 @@ Material RenderSceneMaterial(void);
 typedef struct BatchChunk {
     Mesh mesh;
     BoundingBox bounds;
+    // Props with no vertical extent — grass patches, painted markings — lie in
+    // the ground rather than standing on it, and cannot plausibly shadow the
+    // surface they are part of. Worse, being coplanar with it they land at the
+    // same depth in the shadow map and speckle it with their own acne. They are
+    // batched separately from everything else so the depth pass can skip them.
+    bool castsShadow;
 } BatchChunk;
 
 typedef struct StaticBatch {
