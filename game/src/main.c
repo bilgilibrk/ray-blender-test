@@ -36,6 +36,7 @@
 #include "game/car.h"
 #include "game/hud.h"
 #include "game/race.h"
+#include "game/skid.h"
 
 #define PHYSICS_HZ 120.0f
 #define CAR_SCALE 0.40f
@@ -398,6 +399,9 @@ int main(int argc, char **argv)
                                player->car.position.y },
                     player->car.yaw);
 
+    static SkidTrails skid;
+    SkidInit(&skid);
+
     FixedStepper stepper;
     FixedStepperInit(&stepper, PHYSICS_HZ, 8);
 
@@ -420,10 +424,13 @@ int main(int argc, char **argv)
         if (in.pressed[ACTION_QUIT]) break;
         if (in.pressed[ACTION_PAUSE]) paused = !paused;
         if (in.pressed[ACTION_RESET_CAR] && !paused) {
-            if (race.state == RACE_FINISHED) RaceReset(&race);
+            if (race.state == RACE_FINISHED) { RaceReset(&race); SkidClear(&skid); }
             else RaceRespawn(&race, race.playerIndex);
         }
-        if (race.state == RACE_FINISHED && in.pressed[ACTION_CONFIRM]) RaceReset(&race);
+        if (race.state == RACE_FINISHED && in.pressed[ACTION_CONFIRM]) {
+            RaceReset(&race);
+            SkidClear(&skid);
+        }
 
         CarInput drive = {
             .throttle = in.throttle,
@@ -431,6 +438,7 @@ int main(int argc, char **argv)
             .steer = in.steer,
             .handbrake = in.handbrake,
         };
+
 
         float dt = GetFrameTime();
         // A headless run has no vsync to pace it, so use the fixed step directly.
@@ -441,6 +449,22 @@ int main(int argc, char **argv)
             for (int s = 0; s < steps; s++) RaceUpdate(&race, drive, stepper.step);
         }
 
+        if (!paused) SkidUpdate(&skid, &race, dt);
+
+        {
+            static float maxSlip = 0, maxBrake = 0; static int slipTicks=0, brakeTicks=0, ticks=0;
+            for (int i = 0; i < race.racerCount; i++) {
+                const Racer *r = &race.racers[i];
+                if (r->car.slip > maxSlip) maxSlip = r->car.slip;
+                if (r->input.brake > maxBrake) maxBrake = r->input.brake;
+                if (r->car.slip > 0.30f) slipTicks++;
+                if (r->input.brake > 0.55f) brakeTicks++;
+                ticks++;
+            }
+            if (frame % 400 == 0)
+                TraceLog(LOG_WARNING, "SKIDPROBE f%d maxSlip=%.3f maxBrake=%.3f slipTicks=%d brakeTicks=%d of %d",
+                         frame, (double)maxSlip, (double)maxBrake, slipTicks, brakeTicks, ticks);
+        }
         UpdateHeadlights(&lights, headlights, &race, night);
 
         player = &race.racers[race.playerIndex];
@@ -475,6 +499,10 @@ int main(int argc, char **argv)
         RenderBeginScene(camera.camera, level.skyColor);
             TerrainDraw(&terrain, camera.camera);
             StaticBatchDraw(&batch, camera.camera);
+            // Rubber lies in the road surface, so it goes down after the road
+            // and before the cars — and never in the depth pass above, where a
+            // flat decal has nothing to cast and only fights the tarmac.
+            SkidDraw(&skid);
             // The painted blob stands in only when there is no real shadow to
             // cast one; drawing both would double up under every car.
             if (!RenderShadowsEnabled()) {
@@ -499,6 +527,7 @@ int main(int argc, char **argv)
                 .triangles = batch.totalTriangles,
                 .audioActive = AudioEngineAvailable(),
                 .lightCount = lights.count,
+                .skidMarks = SkidLiveCount(&skid),
                 .night = night,
             };
             HudDrawDebug(&race, &stats);

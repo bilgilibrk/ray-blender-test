@@ -268,8 +268,8 @@ void HudDrawDebug(const Race *race, const HudStats *stats)
              player->progress.lap, player->progress.score);
     TextAt(buffer, 28, y, 16, kDim); y += 20;
 
-    snprintf(buffer, sizeof buffer, "%d lights   %s   audio %s",
-             stats->lightCount, stats->night ? "night" : "day",
+    snprintf(buffer, sizeof buffer, "%d lights   %d skids   %s   audio %s",
+             stats->lightCount, stats->skidMarks, stats->night ? "night" : "day",
              stats->audioActive ? "on" : "off");
     TextAt(buffer, 28, y, 16, kDim); y += 20;
 

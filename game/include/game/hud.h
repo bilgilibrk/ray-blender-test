@@ -18,6 +18,7 @@ typedef struct HudStats {
     int totalChunks;
     int triangles;
     int lightCount;
+    int skidMarks;
     bool audioActive;
     bool night;
 } HudStats;
