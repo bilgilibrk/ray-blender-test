@@ -291,7 +291,16 @@ void RaceUpdate(Race *race, CarInput playerInput, float dt)
         RaceProgress *p = &racer->progress;
 
         // --- decide inputs --------------------------------------------------
-        if (racer->isPlayer && !race->autopilot && !p->finished) {
+        if (locked) {
+            // Held on the line. Note this is *no* input rather than a full
+            // brake: at a standstill the brake doubles as reverse, so braking
+            // through the countdown drove the whole grid backwards off the line.
+            racer->input = (CarInput){ 0 };
+            // The AI sees a stationary car it cannot move and starts counting
+            // towards an unstick manoeuvre. Clear it so nobody launches off the
+            // line already braking and steering backwards.
+            racer->ai.recoverTimer = 0.0f;
+        } else if (racer->isPlayer && !race->autopilot && !p->finished) {
             racer->input = playerInput;
         } else {
             int n = 0;
@@ -309,16 +318,6 @@ void RaceUpdate(Race *race, CarInput playerInput, float dt)
                 racer->input.brake = 0.35f;
             }
         }
-        if (locked) {
-            racer->input.throttle = 0.0f;
-            racer->input.brake = 1.0f;
-            racer->input.steer = 0.0f;
-            // The AI sees a stationary car it cannot move and starts counting
-            // towards an unstick manoeuvre. Clear it so nobody launches off the
-            // line already braking and steering backwards.
-            racer->ai.recoverTimer = 0.0f;
-        }
-
         // --- surface --------------------------------------------------------
         Vector3 here = { racer->car.position.x, racer->car.height, racer->car.position.y };
         SplineQuery q = SplineClosest(race->spline, here, &p->splineHint);
@@ -336,7 +335,8 @@ void RaceUpdate(Race *race, CarInput playerInput, float dt)
             .height = q.position.y,
         };
 
-        CarUpdate(&racer->car, &race->tuning, racer->input, &surface, dt);
+        if (locked) CarHold(&racer->car, &surface, dt);
+        else CarUpdate(&racer->car, &race->tuning, racer->input, &surface, dt);
 
         // --- static collision -------------------------------------------------
         Obb2 box = CarBox(&racer->car, &race->tuning);

@@ -85,6 +85,11 @@ void CarInit(Car *car, Vector2 position, float yaw);
 void CarUpdate(Car *car, const CarTuning *tuning, CarInput input,
                const CarSurface *surface, float dt);
 
+// Plants the car where it stands, gradient and all, and only settles how it
+// sits on the surface. Holding a car with a full brake input does not work:
+// at a standstill the brake doubles as reverse and the car drives off backwards.
+void CarHold(Car *car, const CarSurface *surface, float dt);
+
 // Collision box in world space.
 Obb2 CarBox(const Car *car, const CarTuning *tuning);
 

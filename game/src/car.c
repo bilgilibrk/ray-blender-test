@@ -59,6 +59,15 @@ void CarInit(Car *car, Vector2 position, float yaw)
     car->onTrack = true;
 }
 
+// Presentation only: the car leans into the gradient and rides the surface
+// height. The simulation itself stays flat on the XZ plane.
+static void SettleToSurface(Car *car, const CarSurface *surface, float dt)
+{
+    float pitchTarget = atanf(surface->grade);
+    car->pitch += (pitchTarget - car->pitch) * (1.0f - expf(-12.0f * dt));
+    car->height += (surface->height - car->height) * (1.0f - expf(-18.0f * dt));
+}
+
 Obb2 CarBox(const Car *car, const CarTuning *tuning)
 {
     return (Obb2){
@@ -156,16 +165,28 @@ void CarUpdate(Car *car, const CarTuning *tuning, CarInput input,
     car->position.x += car->velocity.x * dt;
     car->position.y += car->velocity.y * dt;
 
-    // Settle onto the surface and lean into the slope. Both are presentation
-    // only: the simulation itself stays flat.
-    float pitchTarget = atanf(surface->grade);
-    car->pitch += (pitchTarget - car->pitch) * (1.0f - expf(-12.0f * dt));
-    car->height += (surface->height - car->height) * (1.0f - expf(-18.0f * dt));
+    SettleToSurface(car, surface, dt);
 
     car->forwardSpeed = vLong;
     car->lateralSpeed = vLat;
     car->speed = sqrtf(car->velocity.x * car->velocity.x + car->velocity.y * car->velocity.y);
     car->slip = Clamp(fabsf(vLat) / (fabsf(vLong) * 0.45f + 0.9f), 0.0f, 1.0f);
+}
+
+void CarHold(Car *car, const CarSurface *surface, float dt)
+{
+    if (dt <= 0.0f) return;
+
+    car->velocity = (Vector2){ 0.0f, 0.0f };
+    car->steerAngle = 0.0f;
+    car->speed = 0.0f;
+    car->forwardSpeed = 0.0f;
+    car->lateralSpeed = 0.0f;
+    car->yawRate = 0.0f;
+    car->slip = 0.0f;
+    car->slopeAccel = 0.0f;
+
+    SettleToSurface(car, surface, dt);
 }
 
 void CarApplyContact(Car *car, Vector2 normal, float restitution, float scrub)
