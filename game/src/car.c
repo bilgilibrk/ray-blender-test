@@ -61,13 +61,28 @@ void CarInit(Car *car, Vector2 position, float yaw)
     car->onTrack = true;
 }
 
+// Fastest the car may be moved vertically to meet the road, in units a second.
+// Has to clear the steepest climb taken flat out — top speed against an 18%
+// gradient is about 1.2 — with enough margin left to swallow a kerb.
+#define CAR_HEIGHT_FOLLOW_RATE 6.0f
+
 // Presentation only: the car leans into the gradient and rides the surface
 // height. The simulation itself stays flat on the XZ plane.
 static void SettleToSurface(Car *car, const CarSurface *surface, float dt)
 {
     float pitchTarget = atanf(surface->grade);
     car->pitch += (pitchTarget - car->pitch) * (1.0f - expf(-12.0f * dt));
-    car->height += (surface->height - car->height) * (1.0f - expf(-18.0f * dt));
+
+    // Height is rate-limited rather than eased. An exponential ease lags by
+    // (climb rate / its rate) for as long as the gradient lasts, which is a
+    // constant offset, not a transient: it buried the car 4cm into the tarmac
+    // for the whole of an 18% climb and floated it on the way back down. A rate
+    // limit tracks any slope below its own ceiling exactly, and still smooths
+    // the step from a kerb or a respawn.
+    float step = CAR_HEIGHT_FOLLOW_RATE * dt;
+    float delta = surface->height - car->height;
+    if (fabsf(delta) <= step) car->height = surface->height;
+    else car->height += (delta > 0.0f) ? step : -step;
 }
 
 Obb2 CarBox(const Car *car, const CarTuning *tuning)

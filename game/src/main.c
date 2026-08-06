@@ -148,21 +148,30 @@ static void DrawRacer(const Racer *racer, float scale)
 
     float cx = (bounds.min.x + bounds.max.x) * 0.5f;
     float cz = (bounds.min.z + bounds.max.z) * 0.5f;
-    float lift = -bounds.min.y;
 
     float s = sinf(racer->car.yaw), c = cosf(racer->car.yaw);
     float offsetX = (c * cx + s * cz) * scale;
     float offsetZ = (-s * cx + c * cz) * scale;
-
-    Vector3 position = { racer->car.position.x - offsetX,
-                         racer->car.height + lift * scale,
-                         racer->car.position.y - offsetZ };
 
     // Pitch about the car's own lateral axis, so apply it before the yaw. An
     // XYZ euler triple cannot express that ordering, hence the explicit matrix.
     // car.pitch is the slope the car sits on, positive uphill. A positive
     // rotation about +X drops the nose, so it is negated here.
     float pitch = racer->car.pitch * CAR_PITCH_EXAGGERATION;
+
+    // The model turns about its own origin, so pitching it swings one end below
+    // that origin — and the harder it is pitched, the further. Lift by where the
+    // pitched bounding box actually bottoms out rather than by its flat height,
+    // or the tail digs into the road on every gradient. Rotating about X by
+    // -pitch sends a corner to y*cos(pitch) + z*sin(pitch); the lowest one is
+    // whichever end of the car the slope has dropped.
+    float cp = cosf(pitch), sp = sinf(pitch);
+    float lowest = bounds.min.y * cp + ((sp > 0.0f) ? bounds.min.z : bounds.max.z) * sp;
+    float lift = -lowest;
+
+    Vector3 position = { racer->car.position.x - offsetX,
+                         racer->car.height + lift * scale,
+                         racer->car.position.y - offsetZ };
     Matrix transform = MatrixMultiply(
         MatrixMultiply(MatrixScale(scale, scale, scale),
                        MatrixMultiply(MatrixRotateX(-pitch),
