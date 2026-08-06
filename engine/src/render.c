@@ -36,11 +36,43 @@ static struct {
     const LightSet *lights;     // borrowed; the caller owns the storage
     int uploadedCount;
 
+    int locLightVP;
+    int locShadowMap;
+    int locShadowTexel;
+    int locShadowStrength;
+
     Mesh groundMesh;            // unit quad on XZ, scaled per draw
     Material sceneMaterial;
     float reliefLow, reliefHigh;
+
+    Shader depthShader;         // depth-only, for filling the shadow map
+    Material depthMaterial;
+    RenderTexture2D shadowMap;
+    Matrix lightVP;             // world space to the sun's clip space
+    bool shadowsAvailable;
+    bool shadowsEnabled;
+    bool shadowPass;            // true between Begin/EndShadowPass
+
     bool ready;
 } g_render;
+
+// Square, and big enough that a car 0.6 units long still spans tens of texels
+// across the box below.
+#define SHADOW_MAP_SIZE 2048
+
+// Half-width of the world box the map covers, centred on the focus. Has to
+// outrun what the chase camera can see down a straight, or shadows would pop
+// in at the top of the screen.
+#define SHADOW_BOX_EXTENT 17.0f
+
+// Depth range along the sun. Wide enough that a caster well above or below the
+// focus still lands inside, but no wider: the whole range shares the depth
+// buffer's precision, and it is that precision the bias below is measured in.
+#define SHADOW_BOX_DEPTH 44.0f
+
+// How dark a fully occluded fragment's key light goes. Short of 1 so shadows
+// stay translucent rather than turning the ground to a silhouette.
+#define SHADOW_STRENGTH 0.72f
 
 // How far the height tint may darken a baked prop. Vertex colours multiply the
 // material colour, so this can only ever subtract light — going above 1.0 would
@@ -97,6 +129,61 @@ static Mesh MakeGroundQuad(void)
 // entirely with nothing else to catch it.
 #include "scene_shader.inc"
 
+// A framebuffer with a depth texture and no colour attachment. raylib's own
+// LoadRenderTexture gives depth as a renderbuffer, which cannot be sampled.
+static void InitShadowMap(void)
+{
+    g_render.depthShader = LoadShaderFromMemory(kDepthVertexShader, kDepthFragmentShader);
+    if (g_render.depthShader.id == 0) {
+        TraceLog(LOG_WARNING, "RENDER: depth shader failed to compile, shadows off");
+        return;
+    }
+    g_render.depthMaterial = LoadMaterialDefault();
+    g_render.depthMaterial.shader = g_render.depthShader;
+
+    RenderTexture2D map = { 0 };
+    map.id = rlLoadFramebuffer();
+    if (map.id == 0) {
+        TraceLog(LOG_WARNING, "RENDER: no framebuffer for the shadow map, shadows off");
+        return;
+    }
+    map.texture.width = SHADOW_MAP_SIZE;
+    map.texture.height = SHADOW_MAP_SIZE;
+
+    rlEnableFramebuffer(map.id);
+    map.depth.id = rlLoadTextureDepth(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, false);
+    map.depth.width = SHADOW_MAP_SIZE;
+    map.depth.height = SHADOW_MAP_SIZE;
+    map.depth.format = 19;      // DEPTH_COMPONENT_24BIT
+    map.depth.mipmaps = 1;
+    rlFramebufferAttach(map.id, map.depth.id, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
+
+    bool complete = rlFramebufferComplete(map.id);
+    rlDisableFramebuffer();
+
+    if (!complete) {
+        // GLES2 without OES_depth_texture lands here: rlLoadTextureDepth falls
+        // back to a renderbuffer, which will not attach as a texture.
+        TraceLog(LOG_WARNING, "RENDER: shadow map incomplete, shadows off");
+        rlUnloadFramebuffer(map.id);
+        return;
+    }
+
+    g_render.shadowMap = map;
+    g_render.shadowsAvailable = true;
+    g_render.shadowsEnabled = true;
+    TraceLog(LOG_INFO, "RENDER: shadow map %dx%d over a %.0f unit box",
+             SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, (double)(SHADOW_BOX_EXTENT * 2.0f));
+}
+
+bool RenderShadowsAvailable(void) { return g_render.shadowsAvailable; }
+bool RenderShadowsEnabled(void) { return g_render.shadowsEnabled && g_render.shadowsAvailable; }
+
+void RenderSetShadowsEnabled(bool enabled)
+{
+    g_render.shadowsEnabled = enabled;
+}
+
 bool RenderInit(void)
 {
     g_render.shader = LoadShaderFromMemory(kVertexShader, kFragmentShader);
@@ -117,6 +204,13 @@ bool RenderInit(void)
     g_render.locLightPosRange = GetShaderLocation(g_render.shader, "lightPosRange");
     g_render.locLightColor    = GetShaderLocation(g_render.shader, "lightColor");
     g_render.locLightDir      = GetShaderLocation(g_render.shader, "lightDir");
+
+    g_render.locLightVP        = GetShaderLocation(g_render.shader, "lightVP");
+    g_render.locShadowMap      = GetShaderLocation(g_render.shader, "shadowMap");
+    g_render.locShadowTexel    = GetShaderLocation(g_render.shader, "shadowTexel");
+    g_render.locShadowStrength = GetShaderLocation(g_render.shader, "shadowStrength");
+
+    InitShadowMap();
 
     RenderSettings def = {
         .sunDirection = Vector3Normalize((Vector3){ -0.45f, -1.0f, -0.35f }),
@@ -139,6 +233,14 @@ bool RenderInit(void)
 
 void RenderShutdown(void)
 {
+    if (g_render.shadowMap.id > 0) {
+        // Frees the attached depth texture with it.
+        rlUnloadFramebuffer(g_render.shadowMap.id);
+    }
+    g_render.depthMaterial.shader = (Shader){ 0 };
+    if (g_render.depthMaterial.maps) UnloadMaterial(g_render.depthMaterial);
+    if (g_render.depthShader.id != 0) UnloadShader(g_render.depthShader);
+
     if (g_render.groundMesh.vertexCount > 0) UnloadMesh(g_render.groundMesh);
     // Detach first: the material does not own the shader.
     g_render.sceneMaterial.shader = (Shader){ 0 };
@@ -502,6 +604,12 @@ bool RenderFrustumTestBox(const Frustum *f, BoundingBox box)
 
 Frustum RenderFrustumFromCamera(Camera3D camera)
 {
+    // Filling the shadow map, what matters is whether the sun can see a chunk,
+    // not whether the player can — a hill behind the camera still casts onto
+    // the road ahead of it. Overriding here keeps every caller's draw loop the
+    // same in both passes.
+    if (g_render.shadowPass) return FrustumFromMatrix(g_render.lightVP);
+
     float aspect = (float)GetScreenWidth() / (float)GetScreenHeight();
     Matrix view = GetCameraMatrix(camera);
     Matrix proj = (camera.projection == CAMERA_ORTHOGRAPHIC)
@@ -513,11 +621,66 @@ Frustum RenderFrustumFromCamera(Camera3D camera)
 
 void RenderDrawLitMesh(Mesh mesh, Material material, Matrix transform, BoundingBox bounds)
 {
+    // In the depth pass only the silhouette matters, so the lighting work and
+    // the material both go away.
+    if (g_render.shadowPass) {
+        DrawMesh(mesh, g_render.depthMaterial, transform);
+        return;
+    }
+
     Vector3 center = { (bounds.min.x + bounds.max.x) * 0.5f,
                        (bounds.min.y + bounds.max.y) * 0.5f,
                        (bounds.min.z + bounds.max.z) * 0.5f };
     UploadLightsFor(center, Vector3Distance(center, bounds.max));
     DrawMesh(mesh, material, transform);
+}
+
+// --- shadows ----------------------------------------------------------------
+
+void RenderBeginShadowPass(Vector3 focus)
+{
+    if (!RenderShadowsEnabled()) return;
+
+    Vector3 dir = Vector3Normalize(g_render.settings.sunDirection);
+    // A sun pointing straight down would make the usual up vector degenerate.
+    Vector3 up = (fabsf(dir.y) > 0.999f) ? (Vector3){ 0.0f, 0.0f, 1.0f }
+                                         : (Vector3){ 0.0f, 1.0f, 0.0f };
+    float back = SHADOW_BOX_DEPTH * 0.5f;
+
+    // Snap the box to whole shadow texels. Without this the map is re-rasterised
+    // against a slightly different grid every frame and every shadow edge in the
+    // scene crawls as the car moves.
+    Matrix rough = MatrixLookAt(Vector3Subtract(focus, Vector3Scale(dir, back)), focus, up);
+    float texel = (2.0f * SHADOW_BOX_EXTENT) / (float)SHADOW_MAP_SIZE;
+    Vector3 inLight = Vector3Transform(focus, rough);
+    inLight.x = floorf(inLight.x / texel) * texel;
+    inLight.y = floorf(inLight.y / texel) * texel;
+    // Snapping happens in the plane across the sun, which moving the eye along
+    // the sun cannot disturb, so one round trip is enough to settle it.
+    Vector3 snapped = Vector3Transform(inLight, MatrixInvert(rough));
+
+    Matrix view = MatrixLookAt(Vector3Subtract(snapped, Vector3Scale(dir, back)), snapped, up);
+    Matrix proj = MatrixOrtho(-SHADOW_BOX_EXTENT, SHADOW_BOX_EXTENT,
+                              -SHADOW_BOX_EXTENT, SHADOW_BOX_EXTENT,
+                              0.01f, SHADOW_BOX_DEPTH);
+    g_render.lightVP = MatrixMultiply(view, proj);
+
+    g_render.shadowPass = true;
+    BeginTextureMode(g_render.shadowMap);
+    rlClearScreenBuffers();
+    rlEnableDepthTest();
+    rlSetMatrixProjection(proj);
+    rlSetMatrixModelview(view);
+}
+
+void RenderEndShadowPass(void)
+{
+    if (!g_render.shadowPass) return;
+    g_render.shadowPass = false;
+
+    rlDrawRenderBatchActive();
+    rlDisableDepthTest();
+    EndTextureMode();
 }
 
 Material RenderSceneMaterial(void)
@@ -628,10 +791,29 @@ void RenderBeginScene(Camera3D camera, Color background)
 {
     ClearBackground(background);
     BeginMode3D(camera);
-    if (g_render.shader.id != 0) {
-        float camPos[3] = { camera.position.x, camera.position.y, camera.position.z };
-        SetShaderValue(g_render.shader, g_render.locCameraPos, camPos, SHADER_UNIFORM_VEC3);
-    }
+    if (g_render.shader.id == 0) return;
+
+    float camPos[3] = { camera.position.x, camera.position.y, camera.position.z };
+    SetShaderValue(g_render.shader, g_render.locCameraPos, camPos, SHADER_UNIFORM_VEC3);
+
+    float strength = RenderShadowsEnabled() ? SHADOW_STRENGTH : 0.0f;
+    SetShaderValue(g_render.shader, g_render.locShadowStrength, &strength, SHADER_UNIFORM_FLOAT);
+    if (strength <= 0.0f) return;
+
+    SetShaderValueMatrix(g_render.shader, g_render.locLightVP, g_render.lightVP);
+    float texel = 1.0f / (float)SHADOW_MAP_SIZE;
+    SetShaderValue(g_render.shader, g_render.locShadowTexel, &texel, SHADER_UNIFORM_FLOAT);
+
+    // Bound by hand: the sampler is not one of the material's own maps, so
+    // raylib will not bind it for us on each DrawMesh. Slot 1 rather than
+    // anything higher because GLES2 only guarantees eight texture units, and
+    // DrawMesh leaves it alone: it touches a slot only where the material has
+    // a texture, and nothing in this scene fills a map beyond the diffuse.
+    int slot = 1;
+    rlActiveTextureSlot(slot);
+    rlEnableTexture(g_render.shadowMap.depth.id);
+    rlSetUniform(g_render.locShadowMap, &slot, SHADER_UNIFORM_INT, 1);
+    rlActiveTextureSlot(0);
 }
 
 void RenderEndScene(void)
@@ -654,6 +836,14 @@ void RenderModelEuler(Model *model, Vector3 position, Vector3 rotationDeg, Vecto
 void RenderModelTransform(Model *model, Matrix m, Color tint)
 {
     if (!model || model->meshCount == 0) return;
+
+    // Depth pass: silhouette only, so neither the tint nor the lights matter.
+    if (g_render.shadowPass) {
+        for (int i = 0; i < model->meshCount; i++) {
+            DrawMesh(model->meshes[i], g_render.depthMaterial, m);
+        }
+        return;
+    }
 
     // Approximate extent, used only to decide which lights are worth uploading.
     Vector3 position = { m.m12, m.m13, m.m14 };

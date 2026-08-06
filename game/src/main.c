@@ -7,6 +7,7 @@
 //     --fullscreen        borderless fullscreen
 //     --no-audio          skip the audio device
 //     --no-vsync          uncap the frame rate
+//     --no-shadows        skip the sun's shadow pass
 //     --autopilot         let the AI drive the player's car
 //     --debug             start with the debug overlay on
 //     --night             start at night, with the placed lights and headlights
@@ -44,6 +45,11 @@
 // itself looking down at sixty is very nearly nothing. Only the drawn model is
 // exaggerated — the shadow and the headlights still use the true angle.
 #define CAR_PITCH_EXAGGERATION 2.2f
+
+// How far ahead of the car the shadow box is centred. The chase camera shows
+// much more road in front than behind, so a box centred on the car itself
+// spends half its resolution on tarmac nobody is looking at.
+#define SHADOW_LEAD 4.0f
 #define SPLINE_SPACING 0.22f
 #define BATCH_CHUNK_SIZE 6.0f
 #define MAX_SHOTS 16
@@ -61,6 +67,7 @@ typedef struct Options {
     bool fullscreen;
     bool audio;
     bool vsync;
+    bool shadows;
     bool autopilot;
     bool debug;
     bool night;
@@ -80,6 +87,7 @@ static Options DefaultOptions(void)
         .fullscreen = false,
         .audio = true,
         .vsync = true,
+        .shadows = true,
         .autopilot = false,
         .debug = false,
         .night = false,
@@ -117,6 +125,7 @@ static bool ParseArgs(Options *options, int argc, char **argv)
         else if (!strcmp(a, "--fullscreen")) options->fullscreen = true;
         else if (!strcmp(a, "--no-audio")) options->audio = false;
         else if (!strcmp(a, "--no-vsync")) options->vsync = false;
+        else if (!strcmp(a, "--no-shadows")) options->shadows = false;
         else if (!strcmp(a, "--autopilot")) options->autopilot = true;
         else if (!strcmp(a, "--debug")) options->debug = true;
         else if (!strcmp(a, "--night")) options->night = true;
@@ -365,6 +374,11 @@ int main(int argc, char **argv)
     AddHeadlights(&lights, headlights, race.racerCount);
     ApplyLightMode(&lights, baseIntensity, levelLightCount, night);
     RenderSetLights(&lights);
+
+    if (!options.shadows) RenderSetShadowsEnabled(false);
+    else if (!RenderShadowsAvailable()) {
+        TraceLog(LOG_WARNING, "MAIN: no shadow map on this GPU, falling back to blob shadows");
+    }
     TraceLog(LOG_INFO, "MAIN: %d lights (%d from level, %d headlights)",
              lights.count, level.lightCount, race.racerCount * 2);
 
@@ -436,10 +450,29 @@ int main(int argc, char **argv)
         }
 
         BeginDrawing();
+
+        // Depth pass first: the same geometry, seen from the sun. Centred a
+        // little ahead of the car so the box covers the road being driven into
+        // rather than the one already behind.
+        Vector2 lead = CarForward(&player->car);
+        RenderBeginShadowPass((Vector3){ player->car.position.x + lead.x * SHADOW_LEAD,
+                                        player->car.height,
+                                        player->car.position.y + lead.y * SHADOW_LEAD });
+            TerrainDraw(&terrain, camera.camera);
+            StaticBatchDraw(&batch, camera.camera);
+            for (int i = 0; i < race.racerCount; i++) DrawRacer(&race.racers[i], CAR_SCALE);
+        RenderEndShadowPass();
+
         RenderBeginScene(camera.camera, level.skyColor);
             TerrainDraw(&terrain, camera.camera);
             StaticBatchDraw(&batch, camera.camera);
-            for (int i = 0; i < race.racerCount; i++) DrawShadow(&race.racers[i], &race.tuning);
+            // The painted blob stands in only when there is no real shadow to
+            // cast one; drawing both would double up under every car.
+            if (!RenderShadowsEnabled()) {
+                for (int i = 0; i < race.racerCount; i++) {
+                    DrawShadow(&race.racers[i], &race.tuning);
+                }
+            }
             for (int i = 0; i < race.racerCount; i++) DrawRacer(&race.racers[i], CAR_SCALE);
             if (showDebug) {
                 RenderDebugSpline(&spline, (Color){ 90, 220, 255, 160 });

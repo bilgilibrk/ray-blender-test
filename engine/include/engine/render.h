@@ -52,6 +52,30 @@ void RenderSetReliefRange(float lowest, float highest);
 // a neutral tint — until a range has been set.
 float RenderReliefHeight01(float y);
 
+// --- shadows -----------------------------------------------------------------
+//
+// One directional shadow map for the sun. The map covers a box fitted around a
+// focus point rather than the whole level, so it stays sharp on a circuit far
+// larger than any one screenful; geometry outside that box is simply lit.
+//
+// Only the key light is occluded. Ambient, the sky term and the placed lamps
+// still reach into a shadow, so night-time headlights read the same as ever.
+
+// False when the depth attachment could not be made sampleable, which is the
+// case on GLES2 hardware without OES_depth_texture. Draws still work; there
+// are just no shadows to draw.
+bool RenderShadowsAvailable(void);
+
+void RenderSetShadowsEnabled(bool enabled);
+bool RenderShadowsEnabled(void);
+
+// Fills the shadow map. Issue the same draws as the main pass between these
+// two: whatever is drawn is what casts. Culling inside the pass is against the
+// sun rather than the player's camera, so the usual draw helpers need no
+// changes. Does nothing when shadows are off or unavailable.
+void RenderBeginShadowPass(Vector3 focus);
+void RenderEndShadowPass(void);
+
 // --- culling and lit draws --------------------------------------------------
 
 typedef struct Frustum {
