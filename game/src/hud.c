@@ -115,6 +115,36 @@ static void DrawSpeedometer(const Racer *player, const CarTuning *tuning, Rectan
     }
 }
 
+// A gradient readout, because from a top-down camera the road ahead gives the
+// player very little to go on. car.pitch is the slope the car is sitting on, so
+// its tangent is the gradient as a rise over run.
+static void DrawGradient(const Racer *player, Rectangle area)
+{
+    float grade = tanf(player->car.pitch);
+    int percent = (int)roundf(grade * 100.0f);
+
+    // Below this the road is flat enough that a readout would only flicker.
+    if (percent > -2 && percent < 2) return;
+
+    Panel(area);
+
+    bool climbing = (percent > 0);
+    Color tone = climbing ? (Color){ 255, 150, 90, 255 } : (Color){ 130, 220, 255, 255 };
+
+    // A wedge rising or falling in the direction the road goes.
+    float cx = area.x + 22.0f, cy = area.y + area.height * 0.5f;
+    Vector2 a = { cx - 11.0f, climbing ? cy + 8.0f : cy - 8.0f };
+    Vector2 b = { cx + 11.0f, climbing ? cy + 8.0f : cy - 8.0f };
+    Vector2 tip = { cx, climbing ? cy - 9.0f : cy + 9.0f };
+    // Wound counter-clockwise in screen space either way, or the fill drops out.
+    if (climbing) DrawTriangle(tip, a, b, tone);
+    else DrawTriangle(a, tip, b, tone);
+
+    char buffer[16];
+    snprintf(buffer, sizeof buffer, "%d%%", (percent < 0) ? -percent : percent);
+    TextAt(buffer, (int)(area.x + 42), (int)(area.y + 9), 22, tone);
+}
+
 static void DrawResults(const Race *race)
 {
     int w = GetScreenWidth(), h = GetScreenHeight();
@@ -179,6 +209,7 @@ void HudDraw(const Race *race, bool paused)
 
     DrawMinimap(race, (Rectangle){ 16, (float)h - 186, 170, 170 });
     DrawSpeedometer(player, &race->tuning, (Rectangle){ (float)w - 202, (float)h - 96, 186, 80 });
+    DrawGradient(player, (Rectangle){ (float)w - 202, (float)h - 142, 110, 38 });
 
     // --- countdown ------------------------------------------------------------
     if (race->state == RACE_COUNTDOWN) {
