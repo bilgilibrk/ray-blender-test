@@ -24,10 +24,10 @@ void AIDriverInit(AIDriver *ai, float skill, float aggression, float preferredOf
 }
 
 // The car's right-hand direction for a given heading. Matches CarRight(): for
-// yaw t, forward is (sin t, cos t) and right is (cos t, -sin t).
+// a heading (x, z) on the XZ plane, right is (-z, x).
 static Vector2 RightOf(Vector2 dir)
 {
-    return (Vector2){ dir.y, -dir.x };
+    return (Vector2){ -dir.y, dir.x };
 }
 
 static float Dot2(Vector2 a, Vector2 b) { return a.x * b.x + a.y * b.y; }
@@ -82,9 +82,9 @@ CarInput AIThink(AIDriver *ai, const Car *car, const CarTuning *tuning,
 
     // --- choose a racing line ------------------------------------------------
     // Move towards the inside of the corner to clip the apex, scaled by skill.
-    // Lateral offsets are measured to the left, so a right-hand corner wants a
-    // negative offset.
-    float insideSign = (bendAngle > 0.0f) ? -1.0f : 1.0f;
+    // Lateral offsets are measured to the right, so a right-hand corner wants a
+    // positive offset.
+    float insideSign = (bendAngle > 0.0f) ? 1.0f : -1.0f;
     float apexPull = corner01 * q.halfWidth * 0.55f * (0.4f + 0.6f * ai->skill);
     float wobble = sinf((float)GetTime() * 0.7f + ai->wobblePhase) * 0.02f * (1.0f - ai->skill);
     float wantOffset = ai->preferredOffset + insideSign * apexPull + wobble;
@@ -101,10 +101,10 @@ CarInput AIThink(AIDriver *ai, const Car *car, const CarTuning *tuning,
         float side = rel.x * right.x + rel.y * right.y;
         if (fabsf(side) > 0.55f) continue;
 
-        // Steer around the far side: offsets are positive to the left, so a car
+        // Steer around the far side: offsets are positive to the right, so a car
         // sitting on our right pushes us left.
         float urgency = (1.0f - ahead / 1.6f) * (1.0f - 0.35f * ai->aggression);
-        float push = (side >= 0.0f) ? 1.0f : -1.0f;
+        float push = (side >= 0.0f) ? -1.0f : 1.0f;
         wantOffset += push * urgency * q.halfWidth * 0.9f;
     }
     wantOffset = Clamp(wantOffset, -q.halfWidth * 0.85f, q.halfWidth * 0.85f);
@@ -118,9 +118,9 @@ CarInput AIThink(AIDriver *ai, const Car *car, const CarTuning *tuning,
     lookAhead *= 1.0f - 0.25f * corner01;
 
     SplineSample aim = SplineSampleAt(spline, q.distance + lookAhead);
-    Vector2 aimLeft = { -aim.tangent.z, aim.tangent.x };
-    Vector2 targetPoint = { aim.position.x + aimLeft.x * ai->currentOffset,
-                            aim.position.z + aimLeft.y * ai->currentOffset };
+    Vector2 aimRight = RightOf((Vector2){ aim.tangent.x, aim.tangent.z });
+    Vector2 targetPoint = { aim.position.x + aimRight.x * ai->currentOffset,
+                            aim.position.z + aimRight.y * ai->currentOffset };
 
     Vector2 toTarget = { targetPoint.x - car->position.x, targetPoint.y - car->position.y };
     float toTargetLen = sqrtf(toTarget.x * toTarget.x + toTarget.y * toTarget.y);

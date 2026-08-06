@@ -210,10 +210,10 @@ SplineQuery SplineClosest(const Spline *spline, Vector3 point, int *hintIndex)
     q.distance = spline->samples[best].distance + segLen * bestT;
     if (q.distance >= spline->length) q.distance -= spline->length;
 
-    // Sign the lateral offset using the track's left vector (tangent x up).
-    Vector3 left = { -q.tangent.z, 0.0f, q.tangent.x };
+    // Sign the lateral offset using the track's right vector (tangent x up).
+    Vector3 right = { -q.tangent.z, 0.0f, q.tangent.x };
     Vector3 rel = Vector3Subtract(point, q.position);
-    q.lateral = rel.x * left.x + rel.z * left.z;
+    q.lateral = rel.x * right.x + rel.z * right.z;
 
     if (hintIndex) *hintIndex = best;
     return q;

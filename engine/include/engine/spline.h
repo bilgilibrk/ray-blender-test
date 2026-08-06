@@ -40,7 +40,7 @@ typedef struct SplineQuery {
     Vector3 position;       // closest point on the centreline, including height
     Vector3 tangent;        // horizontal
     float distance;         // arc length of that point (lap progress)
-    float lateral;          // signed offset from the centreline, + is left
+    float lateral;          // signed offset from the centreline, + is right
     float halfWidth;        // drivable half-width there
     float grade;            // slope of the track under this point
     int index;              // sample index the result came from

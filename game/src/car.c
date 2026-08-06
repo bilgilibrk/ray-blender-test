@@ -44,11 +44,13 @@ Vector2 CarForward(const Car *car)
     return (Vector2){ sinf(car->yaw), cosf(car->yaw) };
 }
 
-// Right-hand side of the car, consistent with the engine's yaw convention
-// (yaw +90 degrees turns +Z towards +X).
+// Right-hand side of the car: forward x up, which is the same axis a viewer
+// looking along `forward` with +Y up sees as screen right. Yaw grows the other
+// way (+90 degrees takes +Z towards +X, i.e. towards the car's left), so this
+// is not simply forward rotated by +90.
 Vector2 CarRight(const Car *car)
 {
-    return (Vector2){ cosf(car->yaw), -sinf(car->yaw) };
+    return (Vector2){ -cosf(car->yaw), sinf(car->yaw) };
 }
 
 void CarInit(Car *car, Vector2 position, float yaw)
@@ -145,9 +147,12 @@ void CarUpdate(Car *car, const CarTuning *tuning, CarInput input,
     vLat *= expf(-lateralGrip * dt);
 
     // --- heading ------------------------------------------------------------
+    // Positive steer means right, and turning right rotates `forward` towards
+    // CarRight() — which under this yaw convention is a *decreasing* yaw. The
+    // negation is what makes A steer left and D steer right.
     float yawRate = 0.0f;
     if (fabsf(vLong) > 0.03f) {
-        yawRate = vLong * tanf(car->steerAngle) / tuning->wheelbase;
+        yawRate = -vLong * tanf(car->steerAngle) / tuning->wheelbase;
         yawRate = Clamp(yawRate, -tuning->maxYawRate, tuning->maxYawRate);
     }
     car->yawRate = yawRate;
