@@ -49,7 +49,7 @@ for target in desktop drm; do
     [[ $target == drm ]] && define="-DENGINE_PLATFORM_DRM"
 
     gcc -std=c11 $define \
-        -I"$REPO/engine/include" -I"$REPO/engine/src" -I"$REPO/vendor/raylib-build/include" \
+        -I"$REPO/engine/include" -I"$REPO/engine/src" -I"$REPO/vendor/raylib/src" \
         -o "$WORK/dump_$target" "$WORK/dump.c"
     "$WORK/dump_$target" "$WORK/$target.vert" "$WORK/$target.frag"
 

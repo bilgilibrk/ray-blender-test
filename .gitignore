@@ -1,8 +1,10 @@
 # Build output
 build/
 
-# Third-party sources and compiled libraries, restored by tools/setup.sh
-vendor/
+# Third-party downloads. vendor/raylib is a submodule and is tracked;
+# everything else here is fetched or generated.
+vendor/raylib-build/
+vendor/*.zip
 
 # Blender's rolling backup of the .blend
 *.blend1

@@ -21,20 +21,53 @@ switches on a pair of spot headlights:
 
 ## Quick start
 
+raylib is a git submodule (pinned to its 5.5 tag) and is built from source by
+the Makefile, using raylib's own Makefile — no CMake, no zig.
+
 ```sh
-tools/setup.sh          # fetch + build raylib (and the kit, if missing)
-make                    # build build/desktop/racer
+git clone --recurse-submodules <this repo>
+cd ray-blender-test
+make                    # builds raylib, then build/desktop/racer
 make run                # play
 ```
 
-`setup.sh` prints the `apt` line for anything missing. On Debian/Raspberry Pi OS:
+Already cloned without submodules? `git submodule update --init` (or
+`make submodule`). `tools/setup.sh` does that, names any missing system
+packages for your distribution, and fetches the art kit if it is absent.
+
+### Platforms
+
+| | Build | Needs |
+|---|---|---|
+| **Linux** (Arch, Debian, Fedora…) | `make` | GL, X11, ALSA headers |
+| **Windows** | `make` from an **MSYS2 MinGW64** shell | `mingw-w64-x86_64-gcc make git` |
+| **Raspberry Pi console** | `make PLATFORM=drm` | libdrm, libgbm, EGL, GLES2 |
+| **macOS** | `make` | Xcode command line tools (untested) |
+
+Dependencies, if `setup.sh` reports any missing:
 
 ```sh
+# Arch
+sudo pacman -S --needed base-devel mesa libx11 libxrandr libxi libxcursor \
+    libxinerama alsa-lib
+
+# Debian / Ubuntu / Raspberry Pi OS
 sudo apt-get install -y --no-install-recommends \
     build-essential libgl1-mesa-dev libx11-dev libxrandr-dev libxi-dev \
     libxcursor-dev libxinerama-dev libxkbcommon-dev libasound2-dev \
     libdrm-dev libgbm-dev libegl1-mesa-dev libgles2-mesa-dev
+
+# Windows, in the MSYS2 MinGW64 shell
+pacman -S --needed mingw-w64-x86_64-gcc make git
 ```
+
+On Windows, build from the MinGW64 shell (or Git Bash with a MinGW gcc): the
+Makefile uses `sh`, `mkdir -p` and `rm`, which `cmd.exe` does not provide.
+
+The desktop and DRM builds each get their own raylib, configured differently
+(OpenGL 3.3 vs GLES2) and kept in `build/<platform>/libraylib.a`, so you can
+switch between them without a full rebuild. `make clean` removes both along with
+raylib's intermediates.
 
 ### Controls
 
@@ -113,8 +146,10 @@ game/            the racer itself
 
 tools/blender/   io_kenney_racing.py   the level-editor add-on
                  build_demo_track.py   generates levels/circuit01
+tools/           setup.sh, check_shaders.sh
 tests/           headless engine + full-race simulation tests
 levels/          circuit01.level.json (loaded) + circuit01.blend (editable)
+vendor/raylib/   raylib 5.5, a git submodule, built by the Makefile
 ```
 
 ### Design notes
@@ -322,3 +357,5 @@ tile.
 - Art: [Kenney Racing Kit](https://kenney.nl/assets/racing-kit) — CC0, see
   `assets/licenses/`.
 - Engine: [raylib](https://www.raylib.com/) by Ramon Santamaria, zlib/libpng.
+  Vendored as a git submodule at `vendor/raylib`, pinned to the 5.5 tag and
+  built from source — the repository carries no prebuilt binaries.

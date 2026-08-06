@@ -1,73 +1,85 @@
 #!/usr/bin/env bash
-# Fetches and builds everything under vendor/ that the repository does not carry:
-# raylib (as static libs for both targets) and, if the models are missing, the
-# Kenney Racing Kit.
+# One-time setup: check out the raylib submodule, report any missing system
+# packages, and fetch the Kenney kit if the models are not already present.
 #
 #   tools/setup.sh
 #
-# Re-running is safe; existing artifacts are left alone unless --force is given.
+# raylib itself is built by the top-level Makefile, from raylib's own Makefile.
+# Nothing here compiles anything.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENDOR="$REPO/vendor"
-RAYLIB_VERSION="5.5"
 KIT_URL="https://kenney.nl/media/pages/assets/racing-kit/933b8fd9fd-1677580949/kenney_racing-kit.zip"
-
-FORCE=0
-[[ "${1:-}" == "--force" ]] && FORCE=1
 
 say() { printf '\n== %s\n' "$*"; }
 
-# --- system packages ---------------------------------------------------------
-say "checking build dependencies"
-MISSING=()
-for pkg in libgl1-mesa-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
-           libxinerama-dev libxkbcommon-dev libasound2-dev libdrm-dev libgbm-dev \
-           libegl1-mesa-dev libgles2-mesa-dev; do
-    dpkg -s "$pkg" >/dev/null 2>&1 || MISSING+=("$pkg")
-done
-if (( ${#MISSING[@]} )); then
-    echo "missing: ${MISSING[*]}"
-    echo "install with:  sudo apt-get install -y --no-install-recommends ${MISSING[*]}"
-    echo "(continuing — the desktop build may still work if you only need X11)"
-fi
-
-# --- raylib -------------------------------------------------------------------
-mkdir -p "$VENDOR"
-if [[ ! -d "$VENDOR/raylib" ]]; then
-    say "cloning raylib $RAYLIB_VERSION"
-    git clone --depth 1 --branch "$RAYLIB_VERSION" https://github.com/raysan5/raylib.git \
-        "$VENDOR/raylib"
-fi
-
-OUT="$VENDOR/raylib-build"
-if [[ $FORCE -eq 1 || ! -f "$OUT/lib/libraylib_desktop.a" || ! -f "$OUT/lib/libraylib_drm.a" ]]; then
-    mkdir -p "$OUT/lib" "$OUT/include"
-    build_raylib() {
-        local name=$1; shift
-        say "building raylib for $name"
-        make -C "$VENDOR/raylib/src" clean >/dev/null 2>&1 || true
-        make -C "$VENDOR/raylib/src" -j"$(nproc)" "$@" >/dev/null
-        cp "$VENDOR/raylib/src/libraylib.a" "$OUT/lib/libraylib_$name.a"
-    }
-    # Desktop uses GL 3.3 via GLFW/X11; DRM renders straight to /dev/dri with GLES2.
-    build_raylib desktop PLATFORM=PLATFORM_DESKTOP GRAPHICS=GRAPHICS_API_OPENGL_33
-    build_raylib drm     PLATFORM=PLATFORM_DRM     GRAPHICS=GRAPHICS_API_OPENGL_ES2
-    cp "$VENDOR/raylib/src"/{raylib.h,raymath.h,rlgl.h} "$OUT/include/"
-    make -C "$VENDOR/raylib/src" clean >/dev/null 2>&1 || true
+# --- raylib submodule ---------------------------------------------------------
+say "checking out submodules"
+if [[ -d "$REPO/.git" ]]; then
+    git -C "$REPO" submodule update --init
 else
-    say "raylib already built (use --force to rebuild)"
+    echo "not a git checkout — skipping (expected vendor/raylib to be present)"
 fi
 
-# --- Kenney Racing Kit ----------------------------------------------------------
+if [[ ! -f "$REPO/vendor/raylib/src/raylib.h" ]]; then
+    echo "error: vendor/raylib is still empty. Clone with --recurse-submodules, or run"
+    echo "       git submodule update --init"
+    exit 1
+fi
+echo "raylib $(git -C "$REPO/vendor/raylib" describe --tags 2>/dev/null || echo '(detached)') ready"
+
+# --- system packages ------------------------------------------------------------
+# raylib links against the platform's GL and windowing libraries; the package
+# names differ per distribution, the -l flags do not.
+say "checking build dependencies"
+
+case "$(uname -s)" in
+    Linux)
+        if command -v pacman >/dev/null 2>&1; then
+            PKGS="base-devel mesa libx11 libxrandr libxi libxcursor libxinerama alsa-lib"
+            [[ -e /dev/dri ]] && PKGS="$PKGS libdrm mesa"
+            echo "Arch: sudo pacman -S --needed $PKGS"
+        elif command -v apt-get >/dev/null 2>&1; then
+            MISSING=()
+            for pkg in build-essential libgl1-mesa-dev libx11-dev libxrandr-dev libxi-dev \
+                       libxcursor-dev libxinerama-dev libxkbcommon-dev libasound2-dev \
+                       libdrm-dev libgbm-dev libegl1-mesa-dev libgles2-mesa-dev; do
+                dpkg -s "$pkg" >/dev/null 2>&1 || MISSING+=("$pkg")
+            done
+            if (( ${#MISSING[@]} )); then
+                echo "Debian/Ubuntu/Raspberry Pi OS:"
+                echo "  sudo apt-get install -y --no-install-recommends ${MISSING[*]}"
+            else
+                echo "all Debian packages present"
+            fi
+        elif command -v dnf >/dev/null 2>&1; then
+            echo "Fedora: sudo dnf install gcc make mesa-libGL-devel libX11-devel \\"
+            echo "        libXrandr-devel libXi-devel libXcursor-devel libXinerama-devel alsa-lib-devel"
+        else
+            echo "unrecognised distribution — install a C toolchain plus the GL, X11 and ALSA headers"
+        fi
+        ;;
+    MINGW*|MSYS*|CYGWIN*)
+        echo "MSYS2: pacman -S --needed mingw-w64-x86_64-gcc make git"
+        echo "Build from the MinGW64 shell; nothing else is required on Windows."
+        ;;
+    Darwin)
+        echo "macOS: Xcode command line tools provide everything raylib needs."
+        ;;
+    *)
+        echo "unrecognised system '$(uname -s)' — install a C toolchain and GL headers"
+        ;;
+esac
+
+# --- Kenney Racing Kit ------------------------------------------------------------
 # The models are committed (they are CC0), so this only runs on a stripped checkout.
 if [[ ! -f "$REPO/assets/models/roadStraight.glb" ]]; then
     say "downloading the Kenney Racing Kit"
-    curl -sSL -o "$VENDOR/kenney_racing-kit.zip" "$KIT_URL"
-    mkdir -p "$REPO/assets/models" "$REPO/assets/licenses"
-    unzip -q -j -o "$VENDOR/kenney_racing-kit.zip" 'Models/GLTF format/*.glb' \
+    mkdir -p "$REPO/vendor" "$REPO/assets/models" "$REPO/assets/licenses"
+    curl -sSL -o "$REPO/vendor/kenney_racing-kit.zip" "$KIT_URL"
+    unzip -q -j -o "$REPO/vendor/kenney_racing-kit.zip" 'Models/GLTF format/*.glb' \
         -d "$REPO/assets/models/"
-    unzip -q -j -o "$VENDOR/kenney_racing-kit.zip" 'License.txt' -d "$REPO/assets/licenses/"
+    unzip -q -j -o "$REPO/vendor/kenney_racing-kit.zip" 'License.txt' -d "$REPO/assets/licenses/"
     mv "$REPO/assets/licenses/License.txt" "$REPO/assets/licenses/kenney-racing-kit-LICENSE.txt"
 fi
 
