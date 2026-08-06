@@ -16,7 +16,13 @@
 
 #include "tests.h"
 
-#define LEVEL_PATH "levels/circuit01.level.json"
+// Every circuit the game ships. All of them have to be driveable, not just the
+// one the player starts on.
+static const char *kCircuits[] = {
+    "levels/circuit01.level.json",
+    "levels/circuit02.level.json",
+};
+
 #define STEP (1.0f / 120.0f)
 
 
@@ -76,13 +82,13 @@ static SimResult Simulate(Race *race, float limitSeconds, bool trace)
     return result;
 }
 
-void RunRaceTests(void)
+static void RunCircuitTests(const char *path)
 {
-
+    printf("  --- %s\n", path);
 
     Level level;
-    if (!LevelLoad(&level, LEVEL_PATH)) {
-        CHECK(false, "could not load %s (run `make level` first)", LEVEL_PATH);
+    if (!LevelLoad(&level, path)) {
+        CHECK(false, "could not load %s (run `make level` first)", path);
         return;
     }
 
@@ -210,4 +216,11 @@ void RunRaceTests(void)
     CollisionWorldFree(&collision);
     SplineFree(&spline);
     LevelUnload(&level);
+}
+
+void RunRaceTests(void)
+{
+    for (int i = 0; i < (int)(sizeof kCircuits / sizeof kCircuits[0]); i++) {
+        RunCircuitTests(kCircuits[i]);
+    }
 }

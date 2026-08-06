@@ -1,11 +1,12 @@
-"""Build the demo circuit in Blender and export it for the engine.
+"""Build the game's circuits in Blender and export them for the engine.
 
 Run headless:
 
     blender --background --python tools/blender/build_demo_track.py
 
-Produces ``levels/circuit01.level.json`` (what the game loads) and
-``levels/circuit01.blend`` (open this to edit the track by hand).
+Produces a ``.level.json`` per circuit in ``levels/`` (what the game loads) and
+a matching ``.blend`` (open this to edit a track by hand). Every circuit in
+CIRCUITS is rebuilt on each run.
 
 The track is a list of moves along the kit's tile grid. Every kit road port sits
 at the centre of a one-unit cell edge and corners are exact quarter arcs of
@@ -17,10 +18,11 @@ line. Corners stay level: a quarter arc cannot be pitched about a single axis
 without twisting, so the layout puts its gradients on the straights and crests
 before turning in — which is how real circuits tend to read anyway.
 
-The layout is Spa-inspired rather than a replica: the kit only has 90-degree
-corners, so what carries over is the rhythm — a hairpin off the start, a plunge
-into a compression, a long climb, a fast straight at the top, chicanes, and big
-sweepers on the way back down.
+Both layouts are inspired rather than replicas: the kit only has 90-degree
+corners, so what carries over is the rhythm. The Ardennes circuit is Spa — a
+hairpin off the start, a plunge into a compression, a long climb, a fast
+straight at the top. The Eifel circuit is the Nurburgring 24h lap, twice as
+long with twice the elevation.
 """
 
 import math
@@ -37,16 +39,11 @@ sys.path.insert(0, os.path.join(REPO, "tools", "blender"))
 import io_kenney_racing as kr  # noqa: E402
 
 KIT = os.path.join(REPO, "assets", "models")
-OUT_JSON = os.path.join(REPO, "levels", "circuit01.level.json")
-OUT_BLEND = os.path.join(REPO, "levels", "circuit01.blend")
+LEVELS = os.path.join(REPO, "levels")
 
 STRAIGHT = "roadStraight"
 START_TILE = "roadStartPositions"
 CORNER_BY_CELLS = {1: "roadCornerSmall", 2: "roadCornerLarge", 3: "roadCornerLarger"}
-
-# Which tile of the opening straight carries the starting grid. Far enough in
-# that the six staggered grid slots all land on the straight.
-START_LINE_TILE = 8
 
 # Moves around the loop:
 #   ("s", tiles, rise, label)          straight; tiles may be None to be solved
@@ -55,7 +52,7 @@ START_LINE_TILE = 8
 # Exactly two straights must be left as None, on perpendicular headings; their
 # lengths are solved so the loop closes. Any leftover rise is spread across the
 # straights afterwards so the elevation closes too.
-TRACK = [
+TRACK_ARDENNES = [
     ("s", 13, 0.00, "Start/finish straight"),
     ("t", "E", 2, 0.0, "La Source (entry)"),
     ("s", 1, 0.00, ""),
@@ -77,6 +74,79 @@ TRACK = [
     ("s", None, 0.00, "Blanchimont"),
     ("t", "N", 2, 0.0, "Bus stop (left)"),
     ("s", None, 0.00, "Run to the line"),
+]
+
+
+# A second, much longer circuit in the spirit of the Nurburgring 24h layout.
+# Again the rhythm rather than the shape: the kit only turns in right angles, so
+# what carries over is a lap twice the length of the Ardennes one with twice its
+# elevation — a fast run over a crest, a plunge into the valley, a long climb
+# back out to the highest point on the map, then a twisting descent through the
+# forest onto the longest straight of either track.
+TRACK_EIFEL = [
+    # === Start/finish and the Hatzenbach esses =========================
+    ("s", 6, 0.00, "Start/finish straight"),
+    ("t", "E", 2, 0.0, "Hatzenbach (right)"),
+    ("s", 1, -0.05, ""),
+    ("t", "N", 2, 0.0, "Hatzenbach (left)"),
+    ("s", 2, -0.10, ""),
+    ("t", "W", 2, 0.0, "Hatzenbach (out)"),
+    ("s", 1, -0.05, ""),
+    ("t", "N", 2, 0.0, "Hocheichen"),
+    ("s", 5, -0.35, "Quiddelbacher Hohe"),
+
+    # === Flat out over the crest =======================================
+    ("t", "E", 2, 0.0, "Flugplatz"),
+    ("s", 16, 0.95, "Schwedenkreuz"),
+    ("t", "N", 2, 0.0, "Aremberg (left)"),
+    ("s", 3, 0.35, ""),
+    ("t", "E", 2, 0.0, "Aremberg"),
+
+    # === Fuchsrohre: the plunge into the valley ========================
+    ("s", None, -1.30, "Fuchsrohre"),
+    ("t", "S", 2, 0.0, "Adenauer Forst"),
+    ("s", 10, -0.80, "Metzgesfeld"),
+    ("t", "W", 2, 0.0, "Metzgesfeld (left)"),
+    ("s", 2, -0.15, ""),
+    ("t", "S", 2, 0.0, "Kallenhard"),
+    ("s", 13, -1.40, "Kallenhard descent"),
+    ("t", "E", 2, 0.0, "Wehrseifen (left)"),
+    ("s", 2, -0.20, ""),
+    ("t", "S", 2, 0.0, "Wehrseifen"),
+    ("s", 16, -1.80, "Down to Breidscheid"),
+    ("t", "E", 2, 0.0, "Breidscheid"),
+    ("s", 4, 0.10, "Ex-Muhle"),
+    ("t", "S", 2, 0.0, "Bergwerk"),
+    ("s", 7, 0.35, ""),
+
+    # === Kesselchen: the long drag back up =============================
+    ("t", "W", 2, 0.0, "Kesselchen (entry)"),
+    ("s", 16, 1.90, "Kesselchen"),
+    ("t", "S", 2, 0.0, "Klostertal (left)"),
+    ("s", 2, 0.20, ""),
+    ("t", "W", 2, 0.0, "Karussell"),
+    ("s", 8, 1.05, "Hohe Acht"),
+
+    # === Off the roof and down through the forest ======================
+    ("t", "N", 2, 0.0, "Wippermann"),
+    ("s", 3, -0.45, "Eschbach"),
+    ("t", "W", 2, 0.0, "Brunnchen (left)"),
+    ("s", 2, -0.25, ""),
+    ("t", "N", 2, 0.0, "Brunnchen (right)"),
+    ("s", 4, -0.50, "Pflanzgarten"),
+    ("t", "E", 2, 0.0, "Stefanberg (right)"),
+    ("s", 2, -0.20, ""),
+    ("t", "N", 2, 0.0, "Schwalbenschwanz"),
+    ("s", 3, -0.35, "Galgenkopf"),
+    ("t", "W", 2, 0.0, "Galgenkopf (left)"),
+    ("s", 3, -0.15, ""),
+    ("t", "N", 2, 0.0, "Onto the straight"),
+
+    # === Dottinger Hohe: the long run to the line ======================
+    ("s", None, -0.95, "Dottinger Hohe"),
+    ("t", "W", 2, 0.0, "Hohenrain (left)"),
+    ("s", 2, 0.00, "Antoniusbuche"),
+    ("t", "N", 2, 0.0, "Hohenrain (right)"),
 ]
 
 HEADINGS = {"N": (0.0, 1.0), "E": (1.0, 0.0), "S": (0.0, -1.0), "W": (-1.0, 0.0)}
@@ -476,7 +546,7 @@ def verify_line_on_tiles(centre_line, tiles_placed):
                            f"first few: {stray[:5]}")
 
 
-def swap_start_line(straight_cells, index=START_LINE_TILE):
+def swap_start_line(straight_cells, index):
     """Replace two straight tiles with the starting-grid markings."""
     first, second = straight_cells[index], straight_cells[index + 1]
     for entry in (first, second):
@@ -810,31 +880,89 @@ def add_checkpoints(centre_line, start_index, width, count=12):
         bpy.context.collection.objects.link(empty)
 
 
-def main():
-    rng = random.Random(20260806)
+# A tile block placed twice over would look broken and drive worse, and nothing
+# downstream would notice. Anything closer than a lane and a half apart, more
+# than a few points apart along the lap, is the loop folding back onto itself.
+LOOP_CLEARANCE = 1.30
 
+
+def verify_loop_clearance(centre_line):
+    """Fail loudly if the layout crosses or brushes against itself."""
+    n = len(centre_line)
+    worst, at = 1e30, (-1, -1)
+    for i in range(n):
+        for j in range(i + 1, n):
+            along = min(j - i, n - (j - i))
+            if along < 12:
+                continue
+            d = math.dist(centre_line[i][:2], centre_line[j][:2])
+            if d < worst:
+                worst, at = d, (i, j)
+    if worst < LOOP_CLEARANCE:
+        a, b = centre_line[at[0]], centre_line[at[1]]
+        raise RuntimeError(f"layout folds onto itself: {worst:.2f} apart at "
+                           f"({a[0]:.1f}, {a[1]:.1f}) and ({b[0]:.1f}, {b[1]:.1f})")
+    print(f"[track] closest the loop comes to itself: {worst:.2f}")
+
+
+# Every circuit the game ships, in the order the player meets them. `start_tile`
+# picks which straight tile carries the grid, far enough into a straight that
+# all six staggered slots land on it.
+CIRCUITS = [
+    {
+        "slug": "circuit01",
+        "name": "Ardennes Circuit",
+        "moves": TRACK_ARDENNES,
+        "laps": 3,
+        "start_tile": 8,
+        "seed": 20260806,
+    },
+    {
+        "slug": "circuit02",
+        "name": "Eifel Nordschleife",
+        "moves": TRACK_EIFEL,
+        # Half the laps of the Ardennes for more than twice the lap length,
+        # which lands the race at a similar length overall.
+        "laps": 2,
+        "start_tile": 3,
+        "seed": 20260807,
+    },
+]
+
+
+def build_circuit(circuit):
+    rng = random.Random(circuit["seed"])
+
+    # A fresh scene per circuit, but the add-on registers once for the run: its
+    # classes live on the Blender types, which a factory reset leaves alone.
     clear_scene()
-    kr.register()
+    _mesh_cache.clear()
+    _centre_cache.clear()
     kr.KIT_PATH_OVERRIDE = KIT
 
     settings = bpy.context.scene.kr_level
-    settings.level_name = "Ardennes Circuit"
-    settings.laps = 3
+    settings.level_name = circuit["name"]
+    settings.laps = circuit["laps"]
     settings.track_width = 0.69
     settings.waypoint_spacing = 0.45
     settings.auto_colliders = True
     settings.sun_intensity = 0.62
     settings.ambient_color = (0.345, 0.353, 0.392)
 
-    moves = balance_elevation(solve_track(TRACK))
+    print(f"=== {circuit['name']} ({circuit['slug']}) ===")
+    moves = balance_elevation(solve_track(circuit["moves"]))
     centre_line, straight_cells = build_track(moves)
 
     heights = [p[2] for p in centre_line]
+    lap = sum(math.dist(centre_line[i][:2], centre_line[(i + 1) % len(centre_line)][:2])
+              for i in range(len(centre_line)))
     print(f"[track] {len(centre_line)} centre-line points, {len(straight_cells)} straight tiles")
+    print(f"[track] lap {lap:.1f} units over {circuit['laps']} laps")
     print(f"[track] elevation {min(heights):+.2f} .. {max(heights):+.2f} "
           f"(range {max(heights) - min(heights):.2f} units)")
+    verify_loop_clearance(centre_line)
 
-    start_cell, heading, start_height = swap_start_line(straight_cells)
+    start_cell, heading, start_height = swap_start_line(straight_cells, circuit["start_tile"])
     start_index = min(range(len(centre_line)),
                       key=lambda i: (centre_line[i][0] - start_cell[0]) ** 2 +
                                     (centre_line[i][1] - start_cell[1]) ** 2)
@@ -847,15 +975,23 @@ def main():
     add_spawns(centre_line, start_index)
     add_checkpoints(centre_line, start_index, settings.track_width)
 
-    os.makedirs(os.path.dirname(OUT_JSON), exist_ok=True)
-    data = kr.write_level(bpy.context, OUT_JSON)
-    print(f"[export] {OUT_JSON}")
+    out_json = os.path.join(LEVELS, circuit["slug"] + ".level.json")
+    out_blend = os.path.join(LEVELS, circuit["slug"] + ".blend")
+    os.makedirs(LEVELS, exist_ok=True)
+    data = kr.write_level(bpy.context, out_json)
+    print(f"[export] {out_json}")
     print(f"[export] props={len(data['props'])} colliders={len(data['colliders'])} "
           f"spawns={len(data['spawns'])} waypoints={len(data['waypoints'])} "
           f"checkpoints={len(data['checkpoints'])} lights={len(data['lights'])}")
 
-    bpy.ops.wm.save_as_mainfile(filepath=OUT_BLEND)
-    print(f"[export] {OUT_BLEND}")
+    bpy.ops.wm.save_as_mainfile(filepath=out_blend)
+    print(f"[export] {out_blend}")
+
+
+def main():
+    kr.register()
+    for circuit in CIRCUITS:
+        build_circuit(circuit)
 
 
 if __name__ == "__main__":
