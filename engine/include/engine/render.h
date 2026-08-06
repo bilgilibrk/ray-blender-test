@@ -103,6 +103,13 @@ typedef struct ChaseCamera {
     bool rotateWithTarget;  // false keeps the map north-up
     float positionSmoothing;
     float yawSmoothing;
+
+    // Vertical follow is deliberately slower than the horizontal one. Tracking
+    // height exactly would cancel the elevation out: the car would sit at the
+    // same point on screen up a climb and down a descent alike. Trailing it
+    // instead lets the car ride up the frame as it climbs and sink as it drops.
+    float heightSmoothing;
+    float maxHeightLag;     // world units the focus may trail the target by
 } ChaseCamera;
 
 void ChaseCameraInit(ChaseCamera *cam, Vector3 focus, float yaw);

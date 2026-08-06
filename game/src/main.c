@@ -38,6 +38,12 @@
 
 #define PHYSICS_HZ 120.0f
 #define CAR_SCALE 0.40f
+
+// Cars are drawn nosed up or down harder than the road really is. A 17% climb
+// is only ten degrees of pitch, and ten degrees seen from a camera that is
+// itself looking down at sixty is very nearly nothing. Only the drawn model is
+// exaggerated — the shadow and the headlights still use the true angle.
+#define CAR_PITCH_EXAGGERATION 2.2f
 #define SPLINE_SPACING 0.22f
 #define BATCH_CHUNK_SIZE 6.0f
 #define MAX_SHOTS 16
@@ -147,9 +153,10 @@ static void DrawRacer(const Racer *racer, float scale)
     // XYZ euler triple cannot express that ordering, hence the explicit matrix.
     // car.pitch is the slope the car sits on, positive uphill. A positive
     // rotation about +X drops the nose, so it is negated here.
+    float pitch = racer->car.pitch * CAR_PITCH_EXAGGERATION;
     Matrix transform = MatrixMultiply(
         MatrixMultiply(MatrixScale(scale, scale, scale),
-                       MatrixMultiply(MatrixRotateX(-racer->car.pitch),
+                       MatrixMultiply(MatrixRotateX(-pitch),
                                       MatrixRotateY(racer->car.yaw))),
         MatrixTranslate(position.x, position.y, position.z));
     RenderModelTransform(model, transform, racer->tint);

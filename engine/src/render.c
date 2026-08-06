@@ -556,6 +556,11 @@ void ChaseCameraInit(ChaseCamera *cam, Vector3 focus, float yaw)
     cam->rotateWithTarget = true;
     cam->positionSmoothing = 9.0f;
     cam->yawSmoothing = 5.0f;
+    // At racing speed an 18% gradient climbs about 0.7 units a second, so this
+    // rate settles into roughly a third of a unit of lag — enough to see, well
+    // short of shoving the car out of frame.
+    cam->heightSmoothing = 2.0f;
+    cam->maxHeightLag = 0.6f;
 
     cam->camera.up = (Vector3){ 0.0f, 1.0f, 0.0f };
     cam->camera.fovy = 46.0f;
@@ -580,8 +585,16 @@ void ChaseCameraUpdate(ChaseCamera *cam, Vector3 target, float targetYaw, float 
 
     float kp = SmoothFactor(cam->positionSmoothing, dt);
     cam->focus.x += (target.x - cam->focus.x) * kp;
-    cam->focus.y += (target.y - cam->focus.y) * kp;
     cam->focus.z += (target.z - cam->focus.z) * kp;
+
+    // Height trails on its own slower rate, then is capped so a long descent
+    // cannot leave the camera buried in the hill it just came down.
+    float kh = SmoothFactor(cam->heightSmoothing, dt);
+    cam->focus.y += (target.y - cam->focus.y) * kh;
+    if (cam->maxHeightLag > 0.0f) {
+        float lag = Clamp(cam->focus.y - target.y, -cam->maxHeightLag, cam->maxHeightLag);
+        cam->focus.y = target.y + lag;
+    }
 
     if (cam->rotateWithTarget) {
         float ky = SmoothFactor(cam->yawSmoothing, dt);
