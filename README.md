@@ -17,6 +17,11 @@ switches on a pair of spot headlights:
 
 ![night race](docs/night.png)
 
+New to the code? [`docs/learn/`](docs/learn/README.md) is a sixteen-chapter walk
+through every subsystem — arenas, splines, SAT collision, the vehicle model,
+batching, shadow mapping, headless testing — explaining not just what each does
+but why it is shaped that way, with exercises.
+
 ---
 
 ## Quick start
@@ -153,6 +158,7 @@ tools/blender/   io_kenney_racing.py   the level-editor add-on
                  build_demo_track.py   generates levels/circuit01
 tools/           setup.sh, check_shaders.sh
 tests/           headless engine + full-race simulation tests
+docs/learn/      a chapter-by-chapter walkthrough of how all of it works
 levels/          circuit01.level.json (loaded) + circuit01.blend (editable)
 vendor/raylib/   raylib 5.5, a git submodule, built by the Makefile
 ```
