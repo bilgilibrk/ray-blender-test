@@ -18,6 +18,7 @@ int main(int argc, char **argv)
     }
 
     printf("json\n");      RunJsonTests();
+    printf("level\n");     RunLevelTests();
     printf("spline\n");    RunSplineTests();
     printf("collision\n"); RunCollisionTests();
     printf("light\n");     RunLightTests();

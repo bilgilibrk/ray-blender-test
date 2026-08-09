@@ -70,6 +70,75 @@ void RunJsonTests(void)
         ArenaFree(&tmp);
     }
 
+    // --- numbers ------------------------------------------------------------
+    // strtod will take all of these; JSON does not. Letting them through means
+    // a typo in a level file arrives as a plausible-looking coordinate.
+    const char *notJson[] = {
+        "{\"v\": +1}",          // leading plus
+        "{\"v\": 0x10}",        // hex
+        "{\"v\": 0x1p8}",       // hex float
+        "{\"v\": 01}",          // leading zero
+        "{\"v\": 1.}",          // no digit after the point
+        "{\"v\": .5}",          // no digit before it
+        "{\"v\": 1e}",          // no exponent digits
+        "{\"v\": 1e+}",
+        "{\"v\": -}",
+        "{\"v\": 1e999}",       // well-formed, but infinity in a double
+        "{\"v\": -1e999}",
+        "{\"v\": 1E999}",
+    };
+    for (unsigned i = 0; i < sizeof notJson / sizeof notJson[0]; i++) {
+        Arena n;
+        ArenaInit(&n, 1 << 16, "num");
+        JsonValue *r = P(&n, notJson[i], err, sizeof err);
+        CHECK(r == NULL, "accepted a number JSON does not allow: %s", notJson[i]);
+        ArenaFree(&n);
+    }
+
+    // Everything JSON's grammar does allow has to keep working.
+    struct { const char *text; double want; } good[] = {
+        { "{\"v\": 0}", 0.0 },
+        { "{\"v\": -0}", 0.0 },
+        { "{\"v\": 3}", 3.0 },
+        { "{\"v\": -3}", -3.0 },
+        { "{\"v\": 0.5}", 0.5 },
+        { "{\"v\": -1.5e-3}", -0.0015 },
+        { "{\"v\": 2E3}", 2000.0 },
+        { "{\"v\": 2e+3}", 2000.0 },
+        { "{\"v\": 12345.678}", 12345.678 },
+        { "{\"v\": 1e-999}", 0.0 },          // underflow settles on zero
+    };
+    for (unsigned i = 0; i < sizeof good / sizeof good[0]; i++) {
+        Arena n;
+        ArenaInit(&n, 1 << 16, "num");
+        JsonValue *r = P(&n, good[i].text, err, sizeof err);
+        CHECK(r != NULL, "rejected valid JSON: %s (%s)", good[i].text, err);
+        if (r) {
+            double got = JsonNumberField(r, "v", -1.0);
+            CHECK(got == good[i].want, "%s read as %g, expected %g",
+                  good[i].text, got, good[i].want);
+        }
+        ArenaFree(&n);
+    }
+
+    // A number longer than the parser's stack buffer must convert exactly
+    // rather than being truncated to whatever fitted.
+    {
+        char longNumber[512];
+        int at = snprintf(longNumber, sizeof longNumber, "{\"v\": 1.");
+        for (int i = 0; i < 400; i++) longNumber[at++] = '0';
+        snprintf(longNumber + at, sizeof longNumber - (size_t)at, "5e2}");
+        Arena n;
+        ArenaInit(&n, 1 << 16, "long");
+        JsonValue *r = P(&n, longNumber, err, sizeof err);
+        CHECK(r != NULL, "rejected a very long but valid number (%s)", err);
+        if (r) {
+            CHECK(JsonNumberField(r, "v", -1.0) == 100.0,
+                  "long number read as %g, expected 100", JsonNumberField(r, "v", -1.0));
+        }
+        ArenaFree(&n);
+    }
+
     // Deep nesting must hit the depth guard rather than smash the stack.
     char deep[4096];
     memset(deep, '[', sizeof deep - 1);

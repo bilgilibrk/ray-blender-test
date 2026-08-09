@@ -61,6 +61,84 @@ static size_t EstimateLevelBytes(const JsonValue *root, int autoCheckpoints)
     return bytes + 1024;
 }
 
+// Everything the rest of the engine assumes about the numbers in a level.
+//
+// The parser refuses a literal it cannot represent, but `1e300` is a perfectly
+// good JSON number and a perfectly good double — and an infinity the moment it
+// is narrowed to the float these structs hold. One of those in a waypoint is
+// enough to give the spline a NaN lap length and take the terrain build down
+// with it, a long way from the line of the file that caused it. Checking here
+// costs one pass over a few thousand floats and names the offender.
+static bool AllFinite(const float *values, int count)
+{
+    for (int i = 0; i < count; i++) {
+        if (!isfinite(values[i])) return false;
+    }
+    return true;
+}
+
+static bool Vec3Finite(Vector3 v) { return AllFinite(&v.x, 3); }
+
+static bool LevelCheckNumbers(const Level *level)
+{
+    for (int i = 0; i < level->propCount; i++) {
+        const LevelProp *p = &level->props[i];
+        if (!Vec3Finite(p->position) || !Vec3Finite(p->rotationDeg) || !Vec3Finite(p->scale)) {
+            TraceLog(LOG_ERROR, "LEVEL: prop %d ('%s') has a coordinate that is not a number",
+                     i, p->model ? p->model : "?");
+            return false;
+        }
+    }
+    for (int i = 0; i < level->colliderCount; i++) {
+        const LevelCollider *c = &level->colliders[i];
+        if (!Vec3Finite(c->center) || !AllFinite(&c->halfExtents.x, 2) ||
+            !isfinite(c->height) || !isfinite(c->yawDeg)) {
+            TraceLog(LOG_ERROR, "LEVEL: collider %d has a coordinate that is not a number", i);
+            return false;
+        }
+    }
+    for (int i = 0; i < level->sandtrapCount; i++) {
+        const LevelSandtrap *s = &level->sandtraps[i];
+        if (!Vec3Finite(s->center) || !AllFinite(&s->halfExtents.x, 2) || !isfinite(s->yawDeg)) {
+            TraceLog(LOG_ERROR, "LEVEL: sand trap %d has a coordinate that is not a number", i);
+            return false;
+        }
+    }
+    for (int i = 0; i < level->spawnCount; i++) {
+        if (!Vec3Finite(level->spawns[i].position) || !isfinite(level->spawns[i].yawDeg)) {
+            TraceLog(LOG_ERROR, "LEVEL: spawn %d has a coordinate that is not a number", i);
+            return false;
+        }
+    }
+    for (int i = 0; i < level->waypointCount; i++) {
+        if (!Vec3Finite(level->waypoints[i].position) || !isfinite(level->waypoints[i].width)) {
+            TraceLog(LOG_ERROR, "LEVEL: waypoint %d has a coordinate that is not a number", i);
+            return false;
+        }
+    }
+    for (int i = 0; i < level->checkpointCount; i++) {
+        const LevelCheckpoint *c = &level->checkpoints[i];
+        if (!Vec3Finite(c->position) || !isfinite(c->yawDeg) || !isfinite(c->width)) {
+            TraceLog(LOG_ERROR, "LEVEL: checkpoint %d has a coordinate that is not a number", i);
+            return false;
+        }
+    }
+    for (int i = 0; i < level->lightCount; i++) {
+        const LevelLight *l = &level->lights[i];
+        if (!Vec3Finite(l->position) || !Vec3Finite(l->direction) || !isfinite(l->intensity) ||
+            !isfinite(l->range) || !isfinite(l->innerConeDeg) || !isfinite(l->outerConeDeg)) {
+            TraceLog(LOG_ERROR, "LEVEL: light %d has a value that is not a number", i);
+            return false;
+        }
+    }
+    if (!Vec3Finite(level->sunDirection) || !isfinite(level->sunIntensity) ||
+        !isfinite(level->defaultTrackWidth)) {
+        TraceLog(LOG_ERROR, "LEVEL: settings hold a value that is not a number");
+        return false;
+    }
+    return true;
+}
+
 bool LevelLoad(Level *level, const char *path)
 {
     memset(level, 0, sizeof(*level));
@@ -258,14 +336,20 @@ bool LevelLoad(Level *level, const char *path)
         light->outerConeDeg = cone[1];
     }
 
+    ArenaFree(&scratch);
+
+    if (!LevelCheckNumbers(level)) {
+        TraceLog(LOG_ERROR, "LEVEL: '%s' rejected", path);
+        LevelUnload(level);
+        return false;
+    }
+
     TraceLog(LOG_INFO,
              "LEVEL: '%s' loaded — %d props, %d colliders, %d sand traps, %d spawns, "
              "%d waypoints, %d checkpoints, %d lights (%.1f/%.1f KB arena)",
              level->name, level->propCount, level->colliderCount, level->sandtrapCount,
              level->spawnCount, level->waypointCount, level->checkpointCount,
              level->lightCount, level->arena.used / 1024.0, level->arena.capacity / 1024.0);
-
-    ArenaFree(&scratch);
     return true;
 }
 

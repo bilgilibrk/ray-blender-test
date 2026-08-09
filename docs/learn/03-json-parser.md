@@ -1,6 +1,6 @@
 # 03 — Writing a JSON parser
 
-> `engine/include/engine/json.h` · `engine/src/json.c` — 401 lines.
+> `engine/include/engine/json.h` · `engine/src/json.c` — 466 lines.
 > Tests: `tests/test_json.c`.
 
 ---
@@ -281,42 +281,71 @@ character in a track name.
 
 ## Numbers
 
-```c
-static bool ParseNumber(Parser *ps, JsonValue *out)
-{
-    char *endp = NULL;
-    // strtod needs a NUL-terminated buffer; JSON numbers are short so copy locally.
-    char tmp[64];
-    size_t n = (size_t)(ps->end - ps->p);
-    if (n > sizeof(tmp) - 1) n = sizeof(tmp) - 1;
-    memcpy(tmp, ps->p, n);
-    tmp[n] = '\0';
+Numbers are handled in two steps: measure the token against JSON's grammar
+first, then hand the measured token to `strtod`.
 
-    double v = strtod(tmp, &endp);
-    if (endp == tmp) { Fail(ps, "invalid number"); return false; }
-    ps->p += (endp - tmp);
-    out->type = JSON_NUMBER;
-    out->as.number = v;
-    return true;
+```c
+//     -? ( 0 | [1-9][0-9]* ) ( . [0-9]+ )? ( [eE] [+-]? [0-9]+ )?
+static const char *ScanNumber(Parser *ps)
+{
+    const char *p = ps->p;
+    const char *end = ps->end;
+
+    if (p < end && *p == '-') p++;
+
+    if (p >= end || !IsDigit(*p)) { Fail(ps, "number needs a digit"); return NULL; }
+    if (*p == '0') {
+        p++;
+        if (p < end && IsDigit(*p)) { Fail(ps, "number has a leading zero"); return NULL; }
+    } else {
+        while (p < end && IsDigit(*p)) p++;
+    }
+    /* ... fraction, then exponent, both by the same pattern ... */
+    return p;
 }
 ```
 
-Delegating to `strtod` is the right call. Correctly-rounded decimal-to-binary
-conversion is genuinely hard (see: the `0.1` problem, Steele & White's dragon4,
-Gay's `strtod`), and the standard library has a tested implementation.
+Delegating the *conversion* to `strtod` is still the right call.
+Correctly-rounded decimal-to-binary conversion is genuinely hard (see: the `0.1`
+problem, Steele & White's dragon4, Gay's `strtod`), and the standard library has
+a tested implementation.
 
-The awkwardness is that `strtod` requires a NUL-terminated string and the parser
-has a range. Copying up to 63 bytes into a stack buffer solves it. 63 is
-comfortably more than any real JSON number: the longest sensible one,
-`-1.7976931348623157e+308`, is 24 characters.
+Delegating the *validation* to it is not, and this parser used to. `strtod` is a
+C parser, not a JSON one. Pointed at a level file it will accept `0x1p8`, `inf`,
+`nan`, `+1` and `007` — none of which are JSON, all of which then arrive in the
+engine as ordinary-looking numbers. Scanning first is what draws that line.
 
-`endp == tmp` means `strtod` consumed nothing, i.e. the text was not a number at
-all. That is the only failure mode worth reporting; overflow yields `HUGE_VAL`
-and underflow yields zero, which are acceptable for level data.
+**Why not just trust `strtod` and check afterwards?** Because scanning gives you
+the token's length, and the length is what the old code was missing. It copied
+"up to 63 bytes" into a stack buffer and let `strtod` decide where the number
+ended — so a longer literal was silently cut, and either converted to a
+different number or reported as a syntax error several characters past the real
+one. Knowing the length means the buffer can be the right size: the stack copy
+for the ordinary case, the arena for anything longer.
 
-Note this accepts a leading `+`, which strict JSON forbids. `ParseValue`'s
-dispatch includes `c == '+'`. A deliberate leniency, consistent with allowing
-comments.
+**Overflow is a failure, not a rounding.** An earlier version of this chapter
+said overflow "yields `HUGE_VAL` … acceptable for level data". It is not.
+`1e999` is well-formed JSON, and one of them in a waypoint gives the spline a
+NaN lap length and segfaults the terrain build — a long way from the character
+that caused it. So:
+
+```c
+if (!isfinite(v)) { Fail(ps, "number is too large to represent"); return false; }
+```
+
+Underflow is left alone. `1e-999` lands on zero, which is a fair answer to it.
+
+**On leniency.** Comments are still accepted, because hand-editing a level file
+is a thing people do here and `//` is worth having. A leading `+` no longer is:
+it was never a decision so much as a side effect of letting `strtod` do the
+parsing, and the same slack admitted hex floats. Leniency is worth keeping when
+it was chosen; this one was inherited.
+
+One layer is not enough, though. `1e300` passes every check above — it is
+well-formed, and it is a perfectly ordinary `double`. It is an infinity only
+once it is narrowed to the `float` that `LevelWaypoint` actually stores, which
+happens in `level.c`, not here. `LevelCheckNumbers` sweeps the loaded level for
+exactly that and names the offending waypoint. See Chapter 04.
 
 ---
 
@@ -420,7 +449,7 @@ static bool ParseValue(Parser *ps, JsonValue *out)
     else if (remaining >= 4 && memcmp(ps->p, "true", 4) == 0) { /* ... */ }
     else if (remaining >= 5 && memcmp(ps->p, "false", 5) == 0) { /* ... */ }
     else if (remaining >= 4 && memcmp(ps->p, "null", 4) == 0) { /* ... */ }
-    else if (c == '-' || c == '+' || (c >= '0' && c <= '9')) { ok = ParseNumber(ps, out); }
+    else if (c == '-' || IsDigit(c)) { ok = ParseNumber(ps, out); }
     else { Fail(ps, "unexpected character"); }
 
     ps->depth--;

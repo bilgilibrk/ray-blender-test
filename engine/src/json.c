@@ -1,5 +1,6 @@
 #include "engine/json.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -163,19 +164,81 @@ static bool ParseStringBody(Parser *ps, const char **outChars, int *outLength)
     return true;
 }
 
+static bool IsDigit(char c) { return c >= '0' && c <= '9'; }
+
+// Measures a number against JSON's grammar before handing it to strtod:
+//
+//     -? ( 0 | [1-9][0-9]* ) ( . [0-9]+ )? ( [eE] [+-]? [0-9]+ )?
+//
+// strtod on its own is far too generous for a level loader. It is a C parser,
+// not a JSON one, and will happily take `0x1p8`, `inf`, `nan` and a leading
+// `+` — none of which are JSON, and all of which reach the engine as a real
+// number that nothing downstream is expecting. Scanning the token first is
+// also what makes its length known, which is the only way to feed strtod a
+// terminated string without guessing at a buffer size.
+//
+// Returns the end of the token, or NULL after recording why it is not one.
+static const char *ScanNumber(Parser *ps)
+{
+    const char *p = ps->p;
+    const char *end = ps->end;
+
+    if (p < end && *p == '-') p++;
+
+    if (p >= end || !IsDigit(*p)) { Fail(ps, "number needs a digit"); return NULL; }
+    if (*p == '0') {
+        p++;
+        // 007 is C, not JSON, and reads as 7 rather than as the mistake it is.
+        if (p < end && IsDigit(*p)) { Fail(ps, "number has a leading zero"); return NULL; }
+    } else {
+        while (p < end && IsDigit(*p)) p++;
+    }
+
+    if (p < end && *p == '.') {
+        p++;
+        if (p >= end || !IsDigit(*p)) { Fail(ps, "number needs a digit after '.'"); return NULL; }
+        while (p < end && IsDigit(*p)) p++;
+    }
+
+    if (p < end && (*p == 'e' || *p == 'E')) {
+        p++;
+        if (p < end && (*p == '+' || *p == '-')) p++;
+        if (p >= end || !IsDigit(*p)) { Fail(ps, "number needs a digit in its exponent"); return NULL; }
+        while (p < end && IsDigit(*p)) p++;
+    }
+    return p;
+}
+
 static bool ParseNumber(Parser *ps, JsonValue *out)
 {
-    char *endp = NULL;
-    // strtod needs a NUL-terminated buffer; JSON numbers are short so copy locally.
-    char tmp[64];
-    size_t n = (size_t)(ps->end - ps->p);
-    if (n > sizeof(tmp) - 1) n = sizeof(tmp) - 1;
-    memcpy(tmp, ps->p, n);
-    tmp[n] = '\0';
+    const char *stop = ScanNumber(ps);
+    if (!stop) return false;
 
-    double v = strtod(tmp, &endp);
-    if (endp == tmp) { Fail(ps, "invalid number"); return false; }
-    ps->p += (endp - tmp);
+    // strtod needs a NUL-terminated buffer. Almost every number fits the stack
+    // copy; one that does not is still converted exactly rather than silently
+    // truncated to whatever fitted, which used to turn a long literal into a
+    // different number or a bogus syntax error further along the line.
+    size_t length = (size_t)(stop - ps->p);
+    char stack[64];
+    char *text = stack;
+    if (length + 1 > sizeof stack) {
+        text = (char *)ArenaAlloc(ps->arena, length + 1);
+        if (!text) { Fail(ps, "out of arena memory"); return false; }
+    }
+    memcpy(text, ps->p, length);
+    text[length] = '\0';
+
+    // The C locale is what decides that '.' is the decimal point. Nothing in
+    // the engine or in raylib calls setlocale, so it stays the startup default.
+    double v = strtod(text, NULL);
+
+    // 1e999 is a well-formed JSON number and an infinity in a double. Letting
+    // it through costs a waypoint, then a NaN lap length, then a segfault in
+    // the terrain build; refusing it costs one line and names the real problem.
+    // Underflow is left alone: it lands on zero, which is a fair answer.
+    if (!isfinite(v)) { Fail(ps, "number is too large to represent"); return false; }
+
+    ps->p = stop;
     out->type = JSON_NUMBER;
     out->as.number = v;
     return true;
@@ -288,7 +351,9 @@ static bool ParseValue(Parser *ps, JsonValue *out)
     else if (remaining >= 4 && memcmp(ps->p, "null", 4) == 0) {
         ps->p += 4; out->type = JSON_NULL; ok = true;
     }
-    else if (c == '-' || c == '+' || (c >= '0' && c <= '9')) {
+    else if (c == '-' || IsDigit(c)) {
+        // A leading '+' is deliberately not here: it is not JSON, and falling
+        // through to "unexpected character" says so.
         ok = ParseNumber(ps, out);
     }
     else {

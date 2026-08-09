@@ -264,6 +264,41 @@ valid props first) would double the JSON walking to save nothing.
 Note the log line. A silently dropped prop is a mystery; a warned one is a bug
 report.
 
+### Numbers a float cannot hold
+
+The last thing `LevelLoad` does before reporting success is sweep everything it
+just built:
+
+```c
+static bool LevelCheckNumbers(const Level *level)
+{
+    /* ... every position, extent, angle, width, intensity and range ... */
+    for (int i = 0; i < level->waypointCount; i++) {
+        if (!Vec3Finite(level->waypoints[i].position) || !isfinite(level->waypoints[i].width)) {
+            TraceLog(LOG_ERROR, "LEVEL: waypoint %d has a coordinate that is not a number", i);
+            return false;
+        }
+    }
+    /* ... */
+}
+```
+
+This looks like belt-and-braces over a parser that already refuses numbers it
+cannot represent (Chapter 03), and it is not. The parser works in `double`.
+These structs hold `float`. **`1e300` is well-formed JSON, an entirely ordinary
+`double`, and an infinity in a `float`** — so it passes every check the parser
+can reasonably make and still arrives here broken.
+
+The reason to catch it *here*, rather than let it go, is how far it travels
+otherwise. One infinite waypoint gives the spline a bounding box of
+`[-inf, +inf]`; two thirds of its samples come out non-finite; the lap length
+becomes NaN; and the terrain build, which derives its grid dimensions from that
+box, segfaults. The backtrace points at `TerrainBuild` and says nothing at all
+about a level file, which is where the mistake actually is.
+
+The cost is one pass over a few thousand floats at load. The benefit is an error
+message with an index in it.
+
 ### Auto-generated checkpoints
 
 If a level ships no gates, the loader manufactures twelve:

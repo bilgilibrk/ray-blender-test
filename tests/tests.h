@@ -25,5 +25,6 @@ void RunCollisionTests(void);
 void RunLightTests(void);
 void RunRaceTests(void);
 void RunTerrainTests(void);
+void RunLevelTests(void);
 
 #endif // TESTS_H
