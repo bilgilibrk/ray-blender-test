@@ -1,6 +1,6 @@
 # 15 — Build system and portability
 
-> `Makefile` — 173 lines. `tools/setup.sh`, `.gitmodules`.
+> `Makefile` — 181 lines. `tools/setup.sh`, `.gitmodules`.
 
 ---
 
@@ -35,7 +35,7 @@ No CMake. No Meson. No zig. From the Makefile's own header:
 ```
 
 For a project of this size — 24 `.c` files, one library, four platform
-configurations — a Makefile is 173 readable lines with no generator step, no
+configurations — a Makefile is 181 readable lines with no generator step, no
 build directory ceremony, and no tool to install. `make` is already on every
 machine that can compile C.
 
@@ -268,7 +268,8 @@ handed.
 # -MMD -MP emit a .d file per object listing the headers it used, so editing a
 # header rebuilds everything that includes it. Without this, changing a struct
 # leaves stale objects reading fields at the wrong offsets.
-CFLAGS   := -std=c11 -O2 -g $(WARNINGS) -MMD -MP $(PLATFORM_CFLAGS) \
+OPT      ?= -O3
+CFLAGS   := -std=c11 $(OPT) -g $(WARNINGS) -MMD -MP $(PLATFORM_CFLAGS) \
             -Iengine/include -Igame/include -I$(RAYLIB_SRC)
 ```
 
@@ -290,10 +291,35 @@ missing flag.
 if they do not — necessary for the very first build, when no `.d` files exist
 yet.
 
-**`-O2 -g` together.** Optimised *and* with debug symbols. The physics runs at
-120 Hz for six cars and the terrain build is 160 million iterations, so `-O0`
-would be painful; and a crash without symbols is a waste of everyone's time.
-Stepping through optimised code is imperfect but backtraces are exact.
+**`-O3 -g` together.** Optimised *and* with debug symbols. The physics runs at
+120 Hz for six cars and the terrain build is tens of millions of iterations, so
+`-O0` would be painful; and a crash without symbols is a waste of everyone's
+time. Stepping through optimised code is imperfect but backtraces are exact.
+
+**Why `-O3` and not `-O2`.** Because it was measured on the target, not because
+higher is better. On the Pi's Cortex-A53:
+
+| | `-O2` | `-O3` |
+|---|---:|---:|
+| terrain height field, circuit02 | 1423 ms | 587 ms |
+| whole test suite (mostly race simulation) | 10.60 s | 9.66 s |
+| `racer` binary | 2.1 MB | 2.2 MB |
+
+Race telemetry is byte-identical between the two, which is the check that
+matters: this is meant to be a speed change and nothing else.
+
+**`-O3` is not a free win in general.** Microbenchmarking the very same terrain
+kernel found loop shapes that `-O3` makes *slower* — an eight-way unrolled
+version ran at 28 ns/sample under `-O3` against 9.6 under `-O2 -funroll-loops`,
+because more aggressive scheduling spilled the accumulators. The flag is
+justified by measurements of this code as it currently stands. If you change a
+hot path, measure again.
+
+`OPT` is a variable rather than a literal so you can check:
+
+```sh
+make OPT=-O2        # or -O0 -fsanitize=address, or -Os
+```
 
 ---
 

@@ -86,7 +86,15 @@ WARNINGS := -Wall -Wextra -Wno-unused-parameter -Wshadow -Wpointer-arith -Wcast-
 # -MMD -MP emit a .d file per object listing the headers it used, so editing a
 # header rebuilds everything that includes it. Without this, changing a struct
 # leaves stale objects reading fields at the wrong offsets.
-CFLAGS   := -std=c11 -O2 -g $(WARNINGS) -MMD -MP $(PLATFORM_CFLAGS) \
+#
+# -O3 rather than -O2 because it was measured, not because it is bigger. On the
+# Pi's Cortex-A53 it is worth 2.4x on the terrain height field and 9% across the
+# whole test suite, which is mostly race simulation, for byte-identical results.
+# -O3 is not a free win in general — microbenchmarking this same code found loop
+# shapes that it makes slower — so if you change the hot paths, measure again
+# rather than assuming. -g stays: a crash without symbols wastes everyone's time.
+OPT      ?= -O3
+CFLAGS   := -std=c11 $(OPT) -g $(WARNINGS) -MMD -MP $(PLATFORM_CFLAGS) \
             -Iengine/include -Igame/include -I$(RAYLIB_SRC)
 LDLIBS   := $(PLATFORM_LDLIBS)
 
