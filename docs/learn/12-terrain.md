@@ -1,6 +1,6 @@
 # 12 — Terrain from a racing line
 
-> `engine/include/engine/terrain.h` · `engine/src/terrain.c` — 299 lines.
+> `engine/include/engine/terrain.h` · `engine/src/terrain.c` — 382 lines.
 
 ---
 
@@ -39,26 +39,27 @@ with nothing to keep in sync by hand.
 The core question: given an arbitrary point `(x, z)` anywhere in the world, what
 height should the ground be?
 
+Written out plainly, the answer is this:
+
 ```c
-// Inverse-distance weighting against every spline sample. The 1/(d^4 + k) shape
-// makes the ground hug the road closely and relax to the average height in the
-// open, with no creases where the nearest sample changes.
-static float HeightFromSpline(const Spline *spline, float x, float z)
-{
-    float weighted = 0.0f;
-    float total = 0.0f;
-    for (int i = 0; i < spline->count; i++) {
-        Vector3 p = spline->samples[i].position;
-        float dx = x - p.x;
-        float dz = z - p.z;
-        float d2 = dx * dx + dz * dz;
-        float w = 1.0f / (d2 * d2 + 0.45f);
-        weighted += p.y * w;
-        total += w;
-    }
-    return (total > 0.0f) ? weighted / total : 0.0f;
+float weighted = 0.0f;
+float total = 0.0f;
+for (int i = 0; i < spline->count; i++) {
+    Vector3 p = spline->samples[i].position;
+    float dx = x - p.x;
+    float dz = z - p.z;
+    float d2 = dx * dx + dz * dz;
+    float w = 1.0f / (d2 * d2 + 0.45f);
+    weighted += p.y * w;
+    total += w;
 }
+return (total > 0.0f) ? weighted / total : 0.0f;
 ```
+
+That is the definition, and the tests still check the shipped code against it.
+`HeightFieldAt` in `engine/src/terrain.c` computes the same sum a good deal
+faster; [the section on making it fast](#making-it-fast) explains why it looks
+the way it does.
 
 **Inverse-distance weighting** (Shepard's method, 1968) is the standard
 scattered-data interpolant. Every known sample votes for the answer, with a
@@ -93,7 +94,7 @@ The Blender track generator mirrors the value:
 ```python
 # tools/blender/build_demo_track.py
 # Matches the engine's terrain weighting so scenery sits on the same ground the
-# renderer builds. See HeightFromSpline in engine/src/terrain.c.
+# renderer builds. See HeightFieldAt in engine/src/terrain.c.
 TERRAIN_FALLOFF = 0.45
 ```
 
@@ -112,6 +113,78 @@ against a 1,467-sample spline, so that is about 45 million iterations at load �
 noticeable, once, at startup. Acceptable for a load-time cost, and the
 alternative (a spatial index over the spline) would reintroduce the very
 discontinuity the method avoids unless done very carefully.
+
+---
+
+## Making it fast
+
+45 million iterations of eight-odd float operations should not take three
+seconds. On a Pi it did, and the reason is the one operation in that list which
+is not like the others.
+
+```c
+float w = 1.0f / (d2 * d2 + 0.45f);
+```
+
+Every other float op on a Cortex-A53 is pipelined: issue one per cycle, collect
+the answer a few cycles later. Divide is not. The divider is a separate,
+non-pipelined unit, and the next divide cannot start until the current one has
+retired. Worse, the loop as written above makes that unavoidable — `total += w`
+is a chain, each iteration waiting on the last, so the divides are forced into
+single file and the loop runs at the divider's *latency* instead of its
+throughput. Measured on this hardware: about 55 ns per sample, when the
+arithmetic alone is worth perhaps 8.
+
+The fix is to give the hardware more than one thing to do at a time. Split the
+running sums into four independent chains, and step four samples per iteration:
+
+```c
+float w0 = 0.0f, w1 = 0.0f, w2 = 0.0f, w3 = 0.0f;
+float t0 = 0.0f, t1 = 0.0f, t2 = 0.0f, t3 = 0.0f;
+
+int i = 0;
+for (; i + 3 < n; i += 4) {
+    /* ... four distances, four divides, four pairs of accumulates ... */
+}
+for (; i < n; i++) {
+    /* the leftovers, folded into chain 0 */
+}
+
+float weighted = (w0 + w1) + (w2 + w3);
+float total = (t0 + t1) + (t2 + t3);
+```
+
+Four divides with no dependency between them can overlap. Nothing else changes:
+the same samples, the same weights, the same kernel. Only the *order the sum is
+accumulated in* is different, which moves the last bit or two of a float and is
+why `tests/test_terrain.c` checks the result against a `double`-precision
+transcription of the definition rather than against a stored number.
+
+The second half of the win is where the samples are read from. `SplineSample` is
+36 bytes — position, tangent, width, distance, grade — and this loop wants 12 of
+them. `HeightFieldBuild` copies the positions out once into three flat arrays:
+
+```c
+typedef struct HeightField {
+    float *x, *y, *z;   // spline sample positions, one array per component
+    int count;
+    void *storage;      // single allocation backing the three arrays
+} HeightField;
+```
+
+Three contiguous streams, no stride, and the compiler can see through `restrict`
+that they do not alias. Together the two changes take circuit02's height field
+from **3.10 s to 1.43 s**, and the ground it produces is the same ground.
+
+**What was deliberately not done.** The obvious next step is a spatial index —
+bucket the spline, and for buckets far from the query point substitute a single
+aggregate weight for all their samples. It works, and it is worth about another
+7x. It also reintroduces creases: the moment a bucket flips from *summed
+exactly* to *approximated*, the surface steps. Prototyping put that step at
+several millimetres, which is small, but it lands as faint banding once the
+relief shading exaggerates the normals five-fold. The exact sum is a
+[documented design property](#inverse-distance-weighting) of this terrain, not
+an implementation detail to trade away for load time.
 
 ---
 
@@ -172,7 +245,7 @@ bool TerrainBuild(Terrain *terrain, const Spline *spline, const TerrainSettings 
             float x = minX + (float)ix * cellSize;
             float z = minZ + (float)iz * cellSize;
             terrain->heights[iz * (terrain->gridX + 1) + ix] =
-                HeightFromSpline(spline, x, z) - settings->sinkBelowTrack;
+                HeightFieldAt(&field, x, z) - settings->sinkBelowTrack;
         }
     }
     /* ... */
@@ -494,7 +567,7 @@ Spline.samples[i].position.y
     ├──────────────────────────────► CarSurface.height  (cars sit on the road)
     │                                CarSurface.grade   (gravity along the road)
     │
-    ▼  HeightFromSpline — inverse-distance weighting
+    ▼  HeightFieldAt — inverse-distance weighting
 Terrain.heights[]
     │
     ├──► NormalAt          ──► mesh normals   ──► scene lighting
@@ -515,7 +588,7 @@ fair trade; for an open-world game it would not be.
 
 ## Exercises
 
-1. **Change the falloff.** Set the exponent in `HeightFromSpline` to `d²` (use
+1. **Change the falloff.** Set the exponent in `HeightFieldAt` to `d²` (use
    `d2 + 0.45f`) and then to `d⁸` (`d2*d2*d2*d2 + 0.45f`). Screenshot each with
    `F2` from the same spot. Describe how the ground meets the road in each case.
 

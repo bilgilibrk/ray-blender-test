@@ -21,6 +21,7 @@ int main(int argc, char **argv)
     printf("spline\n");    RunSplineTests();
     printf("collision\n"); RunCollisionTests();
     printf("light\n");     RunLightTests();
+    printf("terrain\n");   RunTerrainTests();
     printf("race\n");      RunRaceTests();
 
     printf("\n%d checks, %d failures — %s\n", g_checks, g_failures,

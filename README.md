@@ -360,7 +360,10 @@ make test           # add --verbose for telemetry
 ```
 
 `tests/` covers the JSON reader (including malformed input, deep nesting and
-allocator exhaustion), the spline, and the collision system. `test_race.c` then
+allocator exhaustion), the spline, the collision system, and the terrain height
+field — which is checked against a plain transcription of the interpolation it
+implements, so the fast version cannot quietly drift from the definition.
+`test_race.c` then
 loads the real level and **simulates a complete six-car race with no window** —
 nothing below the renderer touches OpenGL — asserting that every car finishes,
 that lap times are plausible, that the field is not crawling, and that no

@@ -167,7 +167,7 @@ HEADINGS = {"N": (0.0, 1.0), "E": (1.0, 0.0), "S": (0.0, -1.0), "W": (-1.0, 0.0)
 BARRIER_CLEARANCE = 0.68
 
 # Matches the engine's terrain weighting so scenery sits on the same ground the
-# renderer builds. See HeightFromSpline in engine/src/terrain.c.
+# renderer builds. See HeightFieldAt in engine/src/terrain.c.
 TERRAIN_FALLOFF = 0.45
 
 # The renderer drops the ground this far below the blended track height so the
