@@ -26,7 +26,7 @@ run `make test` and see output.
 ```sh
 git submodule update --init
 make            # builds raylib, then build/desktop/racer
-make test       # 348 checks, no window needed
+make test       # 414 checks, no window needed
 make run        # play
 ```
 

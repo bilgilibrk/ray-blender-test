@@ -159,6 +159,7 @@ tools/blender/   io_kenney_racing.py   the level-editor add-on
 tools/           setup.sh, check_shaders.sh
 tests/           headless engine + full-race simulation tests
 docs/learn/      a chapter-by-chapter walkthrough of how all of it works
+docs/improvements/  one document per change, with the measurements behind it
 levels/          circuit01.level.json (loaded) + circuit01.blend (editable)
 vendor/raylib/   raylib 5.5, a git submodule, built by the Makefile
 ```

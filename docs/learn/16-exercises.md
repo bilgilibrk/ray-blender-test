@@ -22,7 +22,7 @@ Work in a branch. `make test` before and after, every time.
 Before any of this, run these and read the output:
 
 ```sh
-make test --verbose             # 348 checks plus telemetry
+make test --verbose             # 414 checks plus telemetry
 ./build/desktop/racer --debug   # F1 overlay on
 ./build/desktop/racer --autopilot --debug    # watch the AI
 make shaders                    # both GLSL variants
