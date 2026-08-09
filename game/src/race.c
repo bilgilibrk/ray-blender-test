@@ -144,7 +144,11 @@ void RaceFree(Race *race)
 
 void RaceReset(Race *race)
 {
-    for (int i = 0; i < race->racerCount; i++) PlaceOnGrid(race, i);
+    for (int i = 0; i < race->racerCount; i++) {
+        PlaceOnGrid(race, i);
+        // Drivers too, or restarting a circuit would replay it differently.
+        AIDriverReset(&race->racers[i].ai);
+    }
     race->state = RACE_COUNTDOWN;
     race->countdown = RACE_COUNTDOWN_SECONDS;
     race->elapsed = 0.0f;

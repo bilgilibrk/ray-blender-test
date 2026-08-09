@@ -716,9 +716,11 @@ the first place.
    to `RaceProgress`, and what has to be reset in `RaceReset`?
 
 7. **Determinism.** Run `--autopilot --frames 7200` twice and compare the final
-   log line. Are they identical? Find the one call in `ai.c` that makes the
-   answer depend on wall-clock time, and replace it with something derived from
-   `race->elapsed`.
+   log line. They should be identical — `ai.c` used to read `GetTime()` here and
+   no longer does (Chapter 14). Now find what *else* could break it: `RaceReset`
+   restores the drivers, but what about the skid trails, the camera, and the
+   spline hint each car carries? Which of those feed back into the simulation,
+   and which are presentation only?
 
 ---
 

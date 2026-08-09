@@ -23,6 +23,13 @@ void AIDriverInit(AIDriver *ai, float skill, float aggression, float preferredOf
     ai->wobblePhase = (float)(seed % 1000) * 0.0062831853f;
 }
 
+void AIDriverReset(AIDriver *ai)
+{
+    ai->currentOffset = ai->preferredOffset;
+    ai->clock = 0.0f;
+    ai->recoverTimer = 0.0f;
+}
+
 // The car's right-hand direction for a given heading. Matches CarRight(): for
 // a heading (x, z) on the XZ plane, right is (-z, x).
 static Vector2 RightOf(Vector2 dir)
@@ -46,6 +53,17 @@ CarInput AIThink(AIDriver *ai, const Car *car, const CarTuning *tuning,
 {
     CarInput input = { 0 };
     if (spline->count < 2) return input;
+
+    // The driver's own clock, advanced by the tick it was handed.
+    //
+    // This used to read GetTime(), which is two mistakes at once. It is
+    // wall-clock, so a fixed-timestep simulation was sampling a variable-rate
+    // source — every physics substep inside one rendered frame saw the same
+    // value, and the same race run twice was not the same race. And it is zero
+    // until a window exists, so in the headless tests the wobble below was
+    // simply switched off: the lap times `make test` reports were not the lap
+    // times the game produces.
+    ai->clock += dt;
 
     Vector3 here = { car->position.x, car->height, car->position.y };
     SplineQuery q = SplineClosest(spline, here, hint);
@@ -86,7 +104,7 @@ CarInput AIThink(AIDriver *ai, const Car *car, const CarTuning *tuning,
     // positive offset.
     float insideSign = (bendAngle > 0.0f) ? 1.0f : -1.0f;
     float apexPull = corner01 * q.halfWidth * 0.55f * (0.4f + 0.6f * ai->skill);
-    float wobble = sinf((float)GetTime() * 0.7f + ai->wobblePhase) * 0.02f * (1.0f - ai->skill);
+    float wobble = sinf(ai->clock * 0.7f + ai->wobblePhase) * 0.02f * (1.0f - ai->skill);
     float wantOffset = ai->preferredOffset + insideSign * apexPull + wobble;
 
     // --- avoid cars we are closing on ----------------------------------------

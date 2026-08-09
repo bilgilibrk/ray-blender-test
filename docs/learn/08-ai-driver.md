@@ -44,6 +44,7 @@ typedef struct AIDriver {
     float preferredOffset;  // resting lateral offset from the centreline
     float currentOffset;    // smoothed, includes avoidance
     float wobblePhase;      // keeps identical drivers from moving identically
+    float clock;            // seconds of *simulated* time this driver has run
     float recoverTimer;     // counts up while stuck, triggers a reverse
 } AIDriver;
 ```
@@ -190,7 +191,7 @@ showed how easy it is to get this backwards.
 // positive offset.
 float insideSign = (bendAngle > 0.0f) ? 1.0f : -1.0f;
 float apexPull = corner01 * q.halfWidth * 0.55f * (0.4f + 0.6f * ai->skill);
-float wobble = sinf((float)GetTime() * 0.7f + ai->wobblePhase) * 0.02f * (1.0f - ai->skill);
+float wobble = sinf(ai->clock * 0.7f + ai->wobblePhase) * 0.02f * (1.0f - ai->skill);
 float wantOffset = ai->preferredOffset + insideSign * apexPull + wobble;
 ```
 
@@ -214,6 +215,15 @@ the back of the field look human and leaves the leaders sharp.
 
 `ai->wobblePhase = (float)(seed % 1000) * 0.0062831853f` spreads phases across
 2π (`0.00628 ≈ 2π/1000`), so cars do not sway in unison.
+
+**`ai->clock` is the driver's own count of simulated seconds**, advanced by the
+`dt` it is handed and reset by `AIDriverReset`. It used to be `GetTime()`, and
+the swap is worth understanding rather than skimming: `GetTime()` is wall-clock,
+so a fixed-timestep simulation was reading a variable-rate source. Every physics
+substep inside one rendered frame saw the same value, so the wobble was sampled
+at the frame rate rather than at 120 Hz, and the same race run twice was not the
+same race. Chapter 14 has the rest of the story, including the part where this
+silently switched the wobble *off* under the headless tests.
 
 ### Avoiding the car in front
 

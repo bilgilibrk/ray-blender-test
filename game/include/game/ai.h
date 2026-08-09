@@ -18,8 +18,13 @@ typedef struct AIDriver {
     float preferredOffset;  // resting lateral offset from the centreline
     float currentOffset;    // smoothed, includes avoidance
     float wobblePhase;      // keeps identical drivers from moving identically
+    float clock;            // seconds of *simulated* time this driver has run
     float recoverTimer;     // counts up while stuck, triggers a reverse
 } AIDriver;
+
+// Puts a driver back to the state it started the race in. The clock is part of
+// that: leaving it running would make a restarted race a different race.
+void AIDriverReset(AIDriver *ai);
 
 void AIDriverInit(AIDriver *ai, float skill, float aggression, float preferredOffset,
                   unsigned int seed);

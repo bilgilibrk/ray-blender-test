@@ -1,6 +1,6 @@
 # 14 — Testing a game without a window
 
-> `tests/` — 900 lines across six files. `tools/check_shaders.sh`.
+> `tests/` — 1,330 lines across eight files. `tools/check_shaders.sh`.
 
 ---
 
@@ -15,33 +15,36 @@ Games are notoriously hard to test. The usual excuses:
 - "The content changes constantly." Then test properties of content, not
   specific content.
 
-This project answers all four. `make test` runs **348 checks in a couple of
-seconds** with no window, no GPU and no display:
+This project answers all four. `make test` runs **414 checks in a few seconds**
+with no window, no GPU and no display:
 
 ```
 json
+level
 spline
 collision
 light
+terrain
 race
   a second at full throttle from 6.60 u/s: tarmac 5.04 u/s (5.60 units),
                                            grass 3.23 (3.42), gravel 0.96 (1.10)
+  --- determinism (levels/circuit01.level.json)
   --- levels/circuit01.level.json
   36 sand traps over 6 sand pieces
   tightest radius 1.31 at arc 63.8 (caps speed at 4.44 u/s); 18% of the lap is corner-limited
-  6/6 finished, race time 88.0s, best lap 23.30s, leader avg speed 3.05 u/s,
-      worst off-track 16%, 0.0 car-seconds in gravel
+  6/6 finished, race time 75.6s, best lap 23.29s, leader avg speed 3.53 u/s,
+      worst off-track 4%, 0.0 car-seconds in gravel
   ran wide into 30 trap stretches: worst got 1.40 units in a second,
       best was still doing 1.02 u/s
   --- levels/circuit02.level.json
   78 sand traps over 13 sand pieces
   tightest radius 1.31 at arc 95.0 (caps speed at 4.47 u/s); 22% of the lap is corner-limited
-  6/6 finished, race time 114.8s, best lap 54.49s, leader avg speed 3.59 u/s,
+  6/6 finished, race time 114.7s, best lap 54.47s, leader avg speed 3.60 u/s,
       worst off-track 5%, 0.0 car-seconds in gravel
   ran wide into 65 trap stretches: worst got 1.37 units in a second,
       best was still doing 1.00 u/s
 
-348 checks, 0 failures — ok
+414 checks, 0 failures — ok
 ```
 
 Read that output as a document. It is not just pass/fail — it is a report on how
@@ -103,9 +106,11 @@ void RunSplineTests(void);
 void RunCollisionTests(void);
 void RunLightTests(void);
 void RunRaceTests(void);
+void RunTerrainTests(void);
+void RunLevelTests(void);
 ```
 
-Twenty-eight lines. No framework, no dependency, no build step.
+Thirty lines. No framework, no dependency, no build step.
 
 Design details worth stealing:
 
@@ -138,9 +143,11 @@ int main(int argc, char **argv)
     }
 
     printf("json\n");      RunJsonTests();
+    printf("level\n");     RunLevelTests();
     printf("spline\n");    RunSplineTests();
     printf("collision\n"); RunCollisionTests();
     printf("light\n");     RunLightTests();
+    printf("terrain\n");   RunTerrainTests();
     printf("race\n");      RunRaceTests();
 
     printf("\n%d checks, %d failures — %s\n", g_checks, g_failures,
@@ -629,30 +636,58 @@ a machine without `glslang-tools`.
 
 ---
 
-## Determinism, and the one crack in it
+## Determinism, and the crack that used to be in it
 
-The simulation is very nearly deterministic: fixed timestep, no threading in the
-simulation path, no `rand()`.
+The simulation is deterministic: fixed timestep, no threading in the simulation
+path, no `rand()`, and — now — no wall clock.
 
-There is one exception, in `ai.c`:
+It did read one. `ai.c` used to compute the racing-line wobble like this:
 
 ```c
 float wobble = sinf((float)GetTime() * 0.7f + ai->wobblePhase) * 0.02f * (1.0f - ai->skill);
 ```
 
-`GetTime()` is wall-clock seconds since `InitWindow`. In a headless test that
-still advances in real time, so two runs of `make test` produce slightly
-different wobble and therefore slightly different lap times.
+An earlier version of this chapter described the consequence as flakiness: that
+`GetTime()` advances in real time even headless, so two runs of `make test`
+would produce slightly different lap times, and the band assertions were what
+absorbed it.
 
-The tests survive it because they assert bands rather than values — which is
-the design working. But it means the suite is not bit-reproducible, and a
-failure at the edge of a band could be intermittent.
+**That was wrong, in an instructive way.** `GetTime()` is `glfwGetTime()`, which
+returns *zero* until GLFW has been initialised — and the test binary never opens
+a window. So `sinf(0 * 0.7f + phase)` was a constant. The suite was not flaky at
+all. The wobble was simply **switched off** for every test that has ever run.
 
-The fix is to derive the wobble from simulated time (`race->elapsed`) rather
-than wall time. That is exercise 5, and Chapter 09's exercise 7.
+Which is the worse failure of the two. Flaky tests announce themselves. This one
+silently exercised a configuration the shipped game never uses, and reported its
+lap times as though they were the game's. Turning the wobble back on moved
+circuit01's race time from 88.0 s to 75.6 s and its worst off-track fraction
+from 16% to 4% — not because anything got better, but because the tests had been
+measuring a different simulation.
 
-**Guard your determinism deliberately.** In a simulation, every read of a
-wall clock, an uninitialised value, or a global RNG is a crack.
+In the *game*, where a window does exist, the original bug was real and was the
+one described: wall-clock time inside a fixed-step loop. Every substep of one
+rendered frame saw the same `GetTime()`, so a 120 Hz simulation sampled its
+wobble at the frame rate, and a race depended on how long the process had been
+running.
+
+The fix is a clock on the driver, advanced by the `dt` it is already handed:
+
+```c
+ai->clock += dt;
+/* ... */
+float wobble = sinf(ai->clock * 0.7f + ai->wobblePhase) * 0.02f * (1.0f - ai->skill);
+```
+
+`RaceReset` calls `AIDriverReset` so that restarting a circuit replays it rather
+than continuing it, and `RunDeterminismTests` in `tests/test_race.c` now runs the
+same race twice with real time deliberately burned in between and requires every
+car to finish in exactly the same place.
+
+**Two lessons, not one.** The obvious one: in a simulation, every read of a wall
+clock, an uninitialised value, or a global RNG is a crack — guard determinism
+deliberately. The less obvious one: a test that cannot reach a code path will
+pass quietly forever. Ask what your harness makes *unreachable*, not just what
+it asserts.
 
 ---
 
@@ -671,13 +706,17 @@ wall clock, an uninitialised value, or a global RNG is a crack.
    array is a permutation of `0..racerCount-1` on every tick. Run it. What would
    break this, and why is it worth checking every tick rather than once?
 
-4. **Find the flakiness.** Run `make test` ten times and record `best lap` for
-   circuit01 each time. How much does it vary? Trace the variation to
-   `GetTime()` in `ai.c`.
+4. **Prove the determinism.** Run `make test` ten times and record `best lap`
+   for circuit01 each time. It should not vary at all. Now make `ai->clock`
+   read `GetTime()` again and re-run: it *still* will not vary, because the
+   test binary has no window and `glfwGetTime()` returns zero before
+   `glfwInit`. What experiment would actually have caught that? (`--frames`
+   with the real game, comparing two runs, is one answer.)
 
-5. **Fix the determinism.** Change `AIThink` to take a time parameter and pass
-   `race->elapsed`. Re-run exercise 4 — is it now identical every time? What
-   else in the codebase reads a wall clock during simulation?
+5. **Find the next crack.** `RunDeterminismTests` proves two runs of one
+   process agree. What would it take to prove two *different builds* agree —
+   and is that even a property you want? Look at the four-chain sum in
+   `HeightFieldAt` (Chapter 12) before answering.
 
 6. **A golden image test.** Use `--frames 120 --shots 120 --shot-prefix golden`
    to capture a deterministic screenshot, commit it, then write a script that

@@ -427,9 +427,95 @@ static void RunSurfaceTests(void)
           "the tarmac case is broken: %.2f u/s", (double)onTarmac);
 }
 
+// The simulation must depend on the ticks it is given and on nothing else.
+//
+// This is not an abstract property. The AI's line wobble used to be driven by
+// GetTime(), so a race depended on how long the process had been running and on
+// where the renderer happened to land its frames — and, because GetTime() reads
+// zero until a window exists, the wobble was switched off entirely under these
+// tests. Whatever `make test` measured, it was not the game.
+static void RunDeterminismTests(const char *path)
+{
+    printf("  --- determinism (%s)\n", path);
+
+    Level level;
+    if (!LevelLoad(&level, path)) {
+        CHECK(false, "could not load %s", path);
+        return;
+    }
+    Spline spline;
+    CollisionWorld collision;
+    CHECK(SplineBuild(&spline, &level, 0.22f), "spline build");
+    CHECK(CollisionWorldBuild(&collision, level.colliders, level.colliderCount, 2.0f),
+          "collision build");
+
+    Race race;
+    CHECK(RaceInit(&race, &level, &spline, &collision, 6), "race init");
+
+    // The driver clock has to be simulated time, not wall-clock: it is the one
+    // thing that pins where the wobble comes from. It counts ticks the driver
+    // was actually asked to think on, so it starts once the countdown is over
+    // rather than at the green light — measure a stretch in the middle of the
+    // race and require it to match the ticks handed over exactly.
+    CarInput idle = { 0 };
+    for (int i = 0; i < 600; i++) RaceUpdate(&race, idle, STEP);
+    CHECK(race.state == RACE_RUNNING, "expected the race to be running by now");
+
+    float before = race.racers[1].ai.clock;
+    const int ticks = 240;
+    for (int i = 0; i < ticks; i++) RaceUpdate(&race, idle, STEP);
+    float advanced = race.racers[1].ai.clock - before;
+    CHECK(fabsf(advanced - (float)ticks * STEP) < 1e-3f,
+          "AI clock advanced %.4f over %d ticks, expected %.4f",
+          (double)advanced, ticks, (double)((float)ticks * STEP));
+
+    // Two runs of the same race, with real time passing in between, must agree
+    // exactly — including the wobble, which is what makes this worth asserting.
+    float positions[RACE_MAX_RACERS][2];
+    for (int pass = 0; pass < 2; pass++) {
+        RaceReset(&race);
+        for (int i = 0; i < 1200; i++) RaceUpdate(&race, idle, STEP);
+
+        if (pass == 0) {
+            for (int r = 0; r < race.racerCount; r++) {
+                positions[r][0] = race.racers[r].car.position.x;
+                positions[r][1] = race.racers[r].car.position.y;
+            }
+            // Burn some wall-clock so anything reading a real clock diverges.
+            volatile float sink = 0.0f;
+            for (long spin = 0; spin < 4000000L; spin++) sink += 1.0f;
+            (void)sink;
+        } else {
+            int differing = 0;
+            for (int r = 0; r < race.racerCount; r++) {
+                if (race.racers[r].car.position.x != positions[r][0] ||
+                    race.racers[r].car.position.y != positions[r][1]) {
+                    differing++;
+                }
+            }
+            CHECK(differing == 0,
+                  "%d of %d cars ended somewhere else on an identical second run",
+                  differing, race.racerCount);
+        }
+    }
+
+    // RaceReset has to put the drivers back too, or a restart is a new race.
+    RaceReset(&race);
+    for (int r = 0; r < race.racerCount; r++) {
+        CHECK(race.racers[r].ai.clock == 0.0f, "driver %d kept a clock of %.3f across a reset",
+              r, (double)race.racers[r].ai.clock);
+    }
+
+    RaceFree(&race);
+    CollisionWorldFree(&collision);
+    SplineFree(&spline);
+    LevelUnload(&level);
+}
+
 void RunRaceTests(void)
 {
     RunSurfaceTests();
+    RunDeterminismTests(kCircuits[0]);
     for (int i = 0; i < (int)(sizeof kCircuits / sizeof kCircuits[0]); i++) {
         RunCircuitTests(kCircuits[i]);
     }

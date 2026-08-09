@@ -164,8 +164,9 @@ Record the whole race and play it back. Two architectures, and choosing between
 them is the exercise:
 
 **Input recording** — store `(tick, carIndex, CarInput)` and re-simulate.
-Tiny files, exact. Requires *perfect determinism*: Chapter 14 identifies the
-`GetTime()` call in `ai.c` as the one crack, and there may be others. Any
+Tiny files, exact. Requires *perfect determinism*: the `GetTime()` call in
+`ai.c` that Chapter 14 used to call the one crack is now closed, and
+`RunDeterminismTests` holds it closed — but there may be others. Any
 floating-point difference compounds and the replay diverges.
 
 **State recording** — store every car's position, yaw and speed every N ticks
