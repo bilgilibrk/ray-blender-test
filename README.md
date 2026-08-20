@@ -22,6 +22,12 @@ through every subsystem — arenas, splines, SAT collision, the vehicle model,
 batching, shadow mapping, headless testing — explaining not just what each does
 but why it is shaped that way, with exercises.
 
+Building the same racer on an engine instead? [`docs/godot/`](docs/godot/README.md)
+is the parallel eighteen-chapter series for **Godot 4** with statically typed
+GDScript, dropping to C through a GDExtension only where a measurement says to —
+and honest throughout about which half of this engine Godot replaces and which
+half is the game.
+
 ---
 
 ## Quick start
@@ -159,6 +165,7 @@ tools/blender/   io_kenney_racing.py   the level-editor add-on
 tools/           setup.sh, check_shaders.sh
 tests/           headless engine + full-race simulation tests
 docs/learn/      a chapter-by-chapter walkthrough of how all of it works
+docs/godot/      the same game rebuilt on Godot 4, in typed GDScript + C
 levels/          circuit01.level.json (loaded) + circuit01.blend (editable)
 vendor/raylib/   raylib 5.5, a git submodule, built by the Makefile
 ```
